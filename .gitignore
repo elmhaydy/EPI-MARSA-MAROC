@@ -56,3 +56,7 @@ Thumbs.db
 # VS Code
 # ==========================
 .vscode/settings.json
+
+backend/venv/
+__pycache__/
+*.pyc

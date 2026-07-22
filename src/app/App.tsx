@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -8,29 +8,52 @@ import {
   Shield, AlertTriangle, CheckCircle, WifiOff, Search, Download, Eye,
   Check, User, Cpu, MapPin, TrendingUp, TrendingDown, Sun, Moon,
   Maximize, ChevronLeft, ChevronRight, Plus, Edit, Trash2, Radio, Zap,
-  Activity,
+  Activity, Play, Pause, Upload, PlugZap, Plug,
 } from "lucide-react";
+
+
+// ─── Backend Configuration ─────────────────────────────────────────────────
+//
+// Point this at your Flask server. The Live Monitoring page polls
+//   GET  {API_BASE_URL}/api/detections/{cameraId}
+// and expects JSON shaped like:
+//   {
+//     "workers": 5,
+//     "compliant": 4,
+//     "boxes": [
+//       { "x": 12.4, "y": 20.1, "w": 11.2, "h": 30.5, "label": "No Helmet", "conf": 94.2, "kind": "violation" }
+//     ]
+//   }
+// x/y/w/h are percentages (0-100) relative to the video frame so boxes stay
+// aligned regardless of the rendered video size. "kind" is one of
+// "ok" | "violation" | "no-vest".
+//
+// When you later swap in a real RTSP camera, nothing here changes — only
+// what the Flask endpoint does behind the scenes (OpenCV VideoCapture on a
+// file today, on an rtsp:// URL later).
+const API_BASE_URL = "http://localhost:5000";
+const DETECTION_POLL_MS = 1000;
 
 
 // ─── Static Data ─────────────────────────────────────────────────────────────
 
 const cameras = [
-  { id: "CAM-001", name: "TC1-Quay-North",    terminal: "Terminal 1", zone: "Quay Zone",       status: "online",  fps: 24, workers: 3,  violations: 1, ip: "192.168.1.101", uptime: "18h 42m" },
-  { id: "CAM-002", name: "TC1-Quay-South",    terminal: "Terminal 1", zone: "Quay Zone",       status: "online",  fps: 24, workers: 5,  violations: 0, ip: "192.168.1.102", uptime: "18h 42m" },
-  { id: "CAM-003", name: "TC1-Storage-A",     terminal: "Terminal 1", zone: "Storage Zone",    status: "online",  fps: 20, workers: 2,  violations: 0, ip: "192.168.1.103", uptime: "17h 15m" },
-  { id: "CAM-004", name: "TC1-Storage-B",     terminal: "Terminal 1", zone: "Storage Zone",    status: "offline", fps: 0,  workers: 0,  violations: 0, ip: "192.168.1.104", uptime: "—" },
-  { id: "CAM-005", name: "TC1-Gate-Entry",    terminal: "Terminal 1", zone: "Gate Area",       status: "online",  fps: 25, workers: 8,  violations: 2, ip: "192.168.1.105", uptime: "18h 42m" },
-  { id: "CAM-006", name: "TC2-Quay-East",     terminal: "Terminal 2", zone: "Quay Zone",       status: "online",  fps: 24, workers: 4,  violations: 1, ip: "192.168.1.201", uptime: "18h 40m" },
-  { id: "CAM-007", name: "TC2-Quay-West",     terminal: "Terminal 2", zone: "Quay Zone",       status: "online",  fps: 22, workers: 6,  violations: 0, ip: "192.168.1.202", uptime: "18h 38m" },
-  { id: "CAM-008", name: "TC2-Container-Yrd", terminal: "Terminal 2", zone: "Container Yard",  status: "online",  fps: 24, workers: 7,  violations: 3, ip: "192.168.1.203", uptime: "18h 42m" },
-  { id: "CAM-009", name: "TC2-Workshop",      terminal: "Terminal 2", zone: "Workshop",        status: "online",  fps: 20, workers: 3,  violations: 0, ip: "192.168.1.204", uptime: "16h 55m" },
-  { id: "CAM-010", name: "TC2-Storage-Main",  terminal: "Terminal 2", zone: "Storage Zone",    status: "offline", fps: 0,  workers: 0,  violations: 0, ip: "192.168.1.205", uptime: "—" },
-  { id: "CAM-011", name: "TC3-Gate-Main",     terminal: "Terminal 3", zone: "Gate Area",       status: "online",  fps: 25, workers: 12, violations: 1, ip: "192.168.1.301", uptime: "18h 42m" },
-  { id: "CAM-012", name: "TC3-Quay-A",        terminal: "Terminal 3", zone: "Quay Zone",       status: "online",  fps: 24, workers: 9,  violations: 2, ip: "192.168.1.302", uptime: "18h 42m" },
-  { id: "CAM-013", name: "TC3-Quay-B",        terminal: "Terminal 3", zone: "Quay Zone",       status: "online",  fps: 23, workers: 5,  violations: 0, ip: "192.168.1.303", uptime: "18h 10m" },
-  { id: "CAM-014", name: "TC3-Container-A",   terminal: "Terminal 3", zone: "Container Yard",  status: "online",  fps: 24, workers: 11, violations: 4, ip: "192.168.1.304", uptime: "18h 42m" },
-  { id: "CAM-015", name: "TC3-Container-B",   terminal: "Terminal 3", zone: "Container Yard",  status: "online",  fps: 21, workers: 6,  violations: 1, ip: "192.168.1.305", uptime: "17h 30m" },
-  { id: "CAM-016", name: "TC3-Workshop-Main", terminal: "Terminal 3", zone: "Workshop",        status: "online",  fps: 20, workers: 4,  violations: 0, ip: "192.168.1.306", uptime: "18h 00m" },
+  { id: "CAM-001", name: "TC1-Quay-North",    terminal: "Terminal 1", zone: "Quay Zone",       status: "online",  fps: 24, workers: 3,  violations: 1, ip: "192.168.1.101", uptime: "18h 42m", videoSrc: "/videos/CAM-001.mp4" },
+  { id: "CAM-002", name: "TC1-Quay-South",    terminal: "Terminal 1", zone: "Quay Zone",       status: "online",  fps: 24, workers: 5,  violations: 0, ip: "192.168.1.102", uptime: "18h 42m", videoSrc: "/videos/CAM-002.mp4" },
+  { id: "CAM-003", name: "TC1-Storage-A",     terminal: "Terminal 1", zone: "Storage Zone",    status: "online",  fps: 20, workers: 2,  violations: 0, ip: "192.168.1.103", uptime: "17h 15m", videoSrc: "/videos/CAM-003.mp4" },
+  { id: "CAM-004", name: "TC1-Storage-B",     terminal: "Terminal 1", zone: "Storage Zone",    status: "offline", fps: 0,  workers: 0,  violations: 0, ip: "192.168.1.104", uptime: "—", videoSrc: "" },
+  { id: "CAM-005", name: "TC1-Gate-Entry",    terminal: "Terminal 1", zone: "Gate Area",       status: "online",  fps: 25, workers: 8,  violations: 2, ip: "192.168.1.105", uptime: "18h 42m", videoSrc: "/videos/CAM-005.mp4" },
+  { id: "CAM-006", name: "TC2-Quay-East",     terminal: "Terminal 2", zone: "Quay Zone",       status: "online",  fps: 24, workers: 4,  violations: 1, ip: "192.168.1.201", uptime: "18h 40m", videoSrc: "/videos/CAM-006.mp4" },
+  { id: "CAM-007", name: "TC2-Quay-West",     terminal: "Terminal 2", zone: "Quay Zone",       status: "online",  fps: 22, workers: 6,  violations: 0, ip: "192.168.1.202", uptime: "18h 38m", videoSrc: "/videos/CAM-007.mp4" },
+  { id: "CAM-008", name: "TC2-Container-Yrd", terminal: "Terminal 2", zone: "Container Yard",  status: "online",  fps: 24, workers: 7,  violations: 3, ip: "192.168.1.203", uptime: "18h 42m", videoSrc: "/videos/CAM-008.mp4" },
+  { id: "CAM-009", name: "TC2-Workshop",      terminal: "Terminal 2", zone: "Workshop",        status: "online",  fps: 20, workers: 3,  violations: 0, ip: "192.168.1.204", uptime: "16h 55m", videoSrc: "/videos/CAM-009.mp4" },
+  { id: "CAM-010", name: "TC2-Storage-Main",  terminal: "Terminal 2", zone: "Storage Zone",    status: "offline", fps: 0,  workers: 0,  violations: 0, ip: "192.168.1.205", uptime: "—", videoSrc: "" },
+  { id: "CAM-011", name: "TC3-Gate-Main",     terminal: "Terminal 3", zone: "Gate Area",       status: "online",  fps: 25, workers: 12, violations: 1, ip: "192.168.1.301", uptime: "18h 42m", videoSrc: "/videos/CAM-011.mp4" },
+  { id: "CAM-012", name: "TC3-Quay-A",        terminal: "Terminal 3", zone: "Quay Zone",       status: "online",  fps: 24, workers: 9,  violations: 2, ip: "192.168.1.302", uptime: "18h 42m", videoSrc: "/videos/CAM-012.mp4" },
+  { id: "CAM-013", name: "TC3-Quay-B",        terminal: "Terminal 3", zone: "Quay Zone",       status: "online",  fps: 23, workers: 5,  violations: 0, ip: "192.168.1.303", uptime: "18h 10m", videoSrc: "/videos/CAM-013.mp4" },
+  { id: "CAM-014", name: "TC3-Container-A",   terminal: "Terminal 3", zone: "Container Yard",  status: "online",  fps: 24, workers: 11, violations: 4, ip: "192.168.1.304", uptime: "18h 42m", videoSrc: "/videos/CAM-014.mp4" },
+  { id: "CAM-015", name: "TC3-Container-B",   terminal: "Terminal 3", zone: "Container Yard",  status: "online",  fps: 21, workers: 6,  violations: 1, ip: "192.168.1.305", uptime: "17h 30m", videoSrc: "/videos/CAM-015.mp4" },
+  { id: "CAM-016", name: "TC3-Workshop-Main", terminal: "Terminal 3", zone: "Workshop",        status: "online",  fps: 20, workers: 4,  violations: 0, ip: "192.168.1.306", uptime: "18h 00m", videoSrc: "/videos/CAM-016.mp4" },
 ];
 
 const initialAlerts = [
@@ -98,16 +121,20 @@ const violationTypePie = [
   { name: "Compliant",    value: 134, color: "#22c55e" },
 ];
 
-const detectionBoxes = [
-  { x: 7,  y: 18, w: 12, h: 30, label: "Person ✓", conf: 98.4, kind: "ok" },
-  { x: 34, y: 28, w: 11, h: 28, label: "No Helmet", conf: 94.2, kind: "violation" },
-  { x: 57, y: 20, w: 13, h: 32, label: "Person ✓", conf: 97.1, kind: "ok" },
-  { x: 74, y: 26, w: 10, h: 27, label: "No Vest",   conf: 91.7, kind: "no-vest" },
-];
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Page = "dashboard" | "monitoring" | "cameras" | "alerts" | "incidents" | "reports" | "settings" | "localisation";
+
+type DetectionBox = {
+  x: number; y: number; w: number; h: number;
+  label: string; conf: number; kind: "ok" | "violation" | "no-vest";
+};
+
+type DetectionPayload = {
+  workers: number;
+  compliant: number;
+  boxes: DetectionBox[];
+};
 
 const navItems: { id: Page; label: string; icon: React.ElementType; badge?: number }[] = [
   { id: "dashboard",  label: "Dashboard",        icon: LayoutDashboard },
@@ -129,6 +156,43 @@ function useDateTime() {
     return () => clearInterval(id);
   }, []);
   return dt;
+}
+
+// Polls the Flask backend for the latest detections on a given camera.
+// Falls back to a static demo overlay if the backend isn't reachable yet,
+// so the frontend keeps working while the API is being built.
+function useDetections(cameraId: string, enabled: boolean) {
+  const [data, setData] = useState<DetectionPayload | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    setChecking(true);
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/detections/${cameraId}`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as DetectionPayload;
+        if (!cancelled) {
+          setData(json);
+          setConnected(true);
+        }
+      } catch {
+        if (!cancelled) setConnected(false);
+      } finally {
+        if (!cancelled) setChecking(false);
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, DETECTION_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [cameraId, enabled]);
+
+  return { data, connected, checking };
 }
 
 // ─── Shared Components ────────────────────────────────────────────────────────
@@ -1011,26 +1075,117 @@ function DashboardPage() {
   );
 }
 
+
+// ─── Live Monitoring Page ─────────────────────────────────────────────────────
+//
+// This page now plays the recorded CCTV clip for the selected camera in a
+// real <video> element (instead of a simulated feed), and overlays live
+// detection boxes polled from the Flask backend. If the backend isn't
+// reachable yet, it automatically falls back to a static demo overlay so the
+// page still renders something meaningful while you're building the API.
+//
+// Swapping to a real IP camera later only means the Flask endpoint switches
+// from `cv2.VideoCapture("clip.mp4")` to `cv2.VideoCapture(rtsp_url)` — this
+// component doesn't change.
+
+
 function LiveMonitoringPage() {
-  const [selectedId, setSelectedId] = useState("CAM-005");
-  const [fps, setFps]         = useState(24);
-  const [inf, setInf]         = useState(13);
+  const [selectedId, setSelectedId] = useState(cameras.find(c => c.videoSrc)?.id ?? cameras[0].id);
+
+  // Custom uploads: the video plays from a local blob URL, but detections
+  // for it come from a real backend camera_id returned by POST /api/upload
+  // once the file has been saved server-side and a worker thread starts
+  // running your model on it.
+  const [customVideoUrl, setCustomVideoUrl] = useState<string | null>(null);
+  const [customVideoName, setCustomVideoName] = useState<string | null>(null);
+  const [uploadCameraId, setUploadCameraId] = useState<string | null>(null);
+  const [uploadState, setUploadState] = useState<"idle" | "uploading" | "error">("idle");
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const [isPlaying, setIsPlaying] = useState(true);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const dt = useDateTime();
   const time = dt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
   const cam = cameras.find(c => c.id === selectedId) ?? cameras[0];
+  const activeVideoSrc = customVideoUrl ?? cam.videoSrc;
+
+  // Which camera_id we poll the Flask backend for: the built-in camera, or
+  // the id it handed back after accepting an uploaded clip.
+  const pollCameraId = customVideoUrl ? uploadCameraId : selectedId;
+  const { data: detections, connected, checking } = useDetections(pollCameraId ?? "", !!pollCameraId);
+
+  // No fallback/demo data — boxes only ever come from your model via Flask.
+  const boxes = detections?.boxes ?? [];
+  const workerCount = detections?.workers ?? 0;
+  const compliantCount = detections?.compliant ?? 0;
+  const violationCount = Math.max(0, workerCount - compliantCount);
+  const helmetOk = boxes.filter(b => b.kind !== "violation").length;
+  const vestOk = boxes.filter(b => b.kind !== "no-vest").length;
+  const noHelmetCount = boxes.filter(b => b.kind === "violation").length;
+  const noVestCount = boxes.filter(b => b.kind === "no-vest").length;
+
+  // Reset playback state whenever the selected camera/video changes.
+  useEffect(() => {
+    setIsPlaying(true);
+  }, [selectedId, customVideoUrl]);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      setFps(22 + Math.floor(Math.random() * 5));
-      setInf(10 + Math.floor(Math.random() * 7));
-    }, 2000);
-    return () => clearInterval(id);
+    return () => {
+      if (customVideoUrl) URL.revokeObjectURL(customVideoUrl);
+    };
+  }, [customVideoUrl]);
+
+  const togglePlay = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) { v.play(); setIsPlaying(true); }
+    else { v.pause(); setIsPlaying(false); }
   }, []);
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (customVideoUrl) URL.revokeObjectURL(customVideoUrl);
+    setCustomVideoUrl(URL.createObjectURL(file));
+    setCustomVideoName(file.name);
+    setUploadCameraId(null);
+    setUploadState("uploading");
+    setUploadError(null);
+
+    // Send the actual file to Flask so your model can run on the real
+    // frames, not just preview them client-side.
+    try {
+      const form = new FormData();
+      form.append("video", file);
+      const res = await fetch(`${API_BASE_URL}/api/upload`, { method: "POST", body: form });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as { camera_id: string };
+      setUploadCameraId(json.camera_id);
+      setUploadState("idle");
+    } catch (err) {
+      setUploadState("error");
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
+    }
+  };
+
+  const clearUpload = () => {
+    if (customVideoUrl) URL.revokeObjectURL(customVideoUrl);
+    setCustomVideoUrl(null);
+    setCustomVideoName(null);
+    setUploadCameraId(null);
+    setUploadState("idle");
+    setUploadError(null);
+  };
 
   const kindColor: Record<string, string> = {
     ok: "#22c55e", violation: "#ef4444", "no-vest": "#f97316",
   };
+
+  const modelIsRunning = connected && !!detections;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
@@ -1038,45 +1193,95 @@ function LiveMonitoringPage() {
         {/* Feed */}
         <div className="rounded-xl border border-border bg-card p-4">
           <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
               <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                <span className="text-xs font-bold text-red-400 tracking-widest">LIVE</span>
+                <span className={`w-2 h-2 rounded-full ${isPlaying ? "bg-red-500 animate-pulse" : "bg-muted-foreground"}`} />
+                <span className={`text-xs font-bold tracking-widest ${isPlaying ? "text-red-400" : "text-muted-foreground"}`}>
+                  {isPlaying ? "LIVE" : "PAUSED"}
+                </span>
               </div>
               <select
-                value={selectedId}
-                onChange={e => setSelectedId(e.target.value)}
+                value={customVideoUrl ? "__custom__" : selectedId}
+                onChange={e => {
+                  if (e.target.value === "__custom__") return;
+                  clearUpload();
+                  setSelectedId(e.target.value);
+                }}
                 className="bg-muted border border-border rounded-lg px-3 py-1.5 text-xs text-foreground outline-none focus:border-primary/50"
               >
-                {cameras.filter(c => c.status === "online").map(c => (
-                  <option key={c.id} value={c.id}>{c.id} — {c.name}</option>
+                {cameras.map(c => (
+                  <option key={c.id} value={c.id} disabled={!c.videoSrc}>
+                    {c.id} — {c.name}{!c.videoSrc ? " (no clip)" : ""}
+                  </option>
                 ))}
+                {customVideoUrl && <option value="__custom__">Uploaded clip — {customVideoName}</option>}
               </select>
+
+              <input ref={fileInputRef} type="file" accept="video/*" className="hidden" onChange={handleUpload} />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-border text-foreground hover:bg-white/5 transition-colors"
+              >
+                <Upload size={12} />Run model on my clip
+              </button>
+              {customVideoUrl && (
+                <button onClick={clearUpload} className="text-xs text-muted-foreground hover:text-foreground underline">
+                  clear
+                </button>
+              )}
             </div>
+
             <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
+              <span
+                className={`hidden sm:flex items-center gap-1.5 px-2 py-1 rounded-full ${modelIsRunning ? "bg-green-500/10 text-green-400" : "bg-orange-500/10 text-orange-400"}`}
+                title={modelIsRunning ? `Receiving live detections from ${API_BASE_URL}` : `No response from ${API_BASE_URL}`}
+              >
+                {modelIsRunning ? <PlugZap size={11} /> : <Plug size={11} />}
+                {checking && !connected ? "Connecting…" : modelIsRunning ? "Model running" : "Backend offline"}
+              </span>
               <span>{time}</span>
+              <button onClick={togglePlay} className="p-1.5 rounded hover:bg-white/10 transition-colors">
+                {isPlaying ? <Pause size={13} /> : <Play size={13} />}
+              </button>
               <button className="p-1.5 rounded hover:bg-white/10 transition-colors"><Maximize size={13} /></button>
             </div>
           </div>
 
-          {/* Simulated CCTV Feed */}
+          {/* Real CCTV clip with live detection overlay from your model */}
           <div className="relative rounded-lg overflow-hidden bg-black" style={{ aspectRatio: "16/9" }}>
-            {/* Scanlines */}
-            <div className="absolute inset-0 pointer-events-none opacity-[0.04]" style={{
-              backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,1) 2px, rgba(0,0,0,1) 4px)",
-            }} />
-            {/* Grid */}
-            <div className="absolute inset-0 pointer-events-none opacity-[0.07]" style={{
-              backgroundImage: "linear-gradient(rgba(0,200,50,0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(0,200,50,0.3) 1px, transparent 1px)",
-              backgroundSize: "40px 40px",
-            }} />
-            {/* Vignette */}
-            <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.65) 100%)" }} />
-            {/* Ground suggestion */}
-            <div className="absolute bottom-0 left-0 right-0 h-2/5 pointer-events-none opacity-15" style={{ background: "linear-gradient(to top, #0a200a, transparent)" }} />
+            {activeVideoSrc ? (
+              <video
+                key={activeVideoSrc}
+                ref={videoRef}
+                src={activeVideoSrc}
+                className="absolute inset-0 w-full h-full object-cover"
+                autoPlay
+                loop
+                muted
+                playsInline
+                onPlay={() => setIsPlaying(true)}
+                onPause={() => setIsPlaying(false)}
+                onError={() => setIsPlaying(false)}
+              />
+            ) : (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+                <WifiOff size={20} className="text-white/30" />
+                <span className="text-xs text-white/40 font-mono">No clip assigned to this camera yet</span>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="mt-1 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white"
+                  style={{ background: "#f97316" }}
+                >
+                  <Upload size={12} />Upload a clip
+                </button>
+              </div>
+            )}
 
-            {/* Detection boxes */}
-            {detectionBoxes.map((d, i) => {
+            {/* Subtle vignette so overlays stay legible over real footage */}
+            <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse at center, transparent 65%, rgba(0,0,0,0.35) 100%)" }} />
+
+            {/* Detection boxes — real model output only, nothing synthetic */}
+            {activeVideoSrc && modelIsRunning && boxes.map((d, i) => {
               const col = kindColor[d.kind];
               return (
                 <div key={i} className="absolute" style={{ left: `${d.x}%`, top: `${d.y}%`, width: `${d.w}%`, height: `${d.h}%`, border: `2px solid ${col}`, boxShadow: `0 0 12px ${col}50` }}>
@@ -1092,31 +1297,64 @@ function LiveMonitoringPage() {
             })}
 
             {/* Overlays */}
-            <div className="absolute top-3 left-3 space-y-1">
-              <div className="text-xs font-mono text-white/80 bg-black/60 px-2 py-0.5 rounded">{cam.id}</div>
-              <div className="text-xs font-mono text-white/55 bg-black/60 px-2 py-0.5 rounded">{cam.terminal} · {cam.zone}</div>
-            </div>
-            <div className="absolute top-3 right-3 font-mono text-white/60 bg-black/60 px-2 py-0.5 rounded" style={{ fontSize: 10 }}>
-              {fps} FPS · {inf}ms
-            </div>
-            <div className="absolute bottom-3 right-3 font-mono text-white/40 bg-black/60 px-2 py-0.5 rounded" style={{ fontSize: 10 }}>
-              {time}
-            </div>
-            <div className="absolute bottom-3 left-3 flex items-center gap-1.5 bg-black/60 px-2 py-0.5 rounded">
-              <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-xs font-mono font-bold text-red-400">REC</span>
-            </div>
+            {activeVideoSrc && (
+              <>
+                <div className="absolute top-3 left-3 space-y-1">
+                  <div className="text-xs font-mono text-white/80 bg-black/60 px-2 py-0.5 rounded">
+                    {customVideoUrl ? customVideoName : cam.id}
+                  </div>
+                  {!customVideoUrl && (
+                    <div className="text-xs font-mono text-white/55 bg-black/60 px-2 py-0.5 rounded">{cam.terminal} · {cam.zone}</div>
+                  )}
+                </div>
+                <div className="absolute top-3 right-3 font-mono text-white/60 bg-black/60 px-2 py-0.5 rounded" style={{ fontSize: 10 }}>
+                  {modelIsRunning ? "YOLOv8 · live" : "no detections"}
+                </div>
+                <div className="absolute bottom-3 right-3 font-mono text-white/40 bg-black/60 px-2 py-0.5 rounded" style={{ fontSize: 10 }}>
+                  {time}
+                </div>
+                <div className="absolute bottom-3 left-3 flex items-center gap-1.5 bg-black/60 px-2 py-0.5 rounded">
+                  <span className={`w-1.5 h-1.5 rounded-full ${isPlaying ? "bg-red-500 animate-pulse" : "bg-white/30"}`} />
+                  <span className={`text-xs font-mono font-bold ${isPlaying ? "text-red-400" : "text-white/40"}`}>
+                    {isPlaying ? "REC" : "PAUSED"}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
+
+          {uploadState === "uploading" && (
+            <div className="mt-3 flex items-center gap-2 text-xs text-blue-400 bg-blue-500/5 border border-blue-500/20 rounded-lg px-3 py-2">
+              <span className="w-3 h-3 rounded-full border-2 border-blue-400 border-t-transparent animate-spin flex-shrink-0" />
+              <span>Uploading clip to {API_BASE_URL} and starting the model on it…</span>
+            </div>
+          )}
+          {uploadState === "error" && (
+            <div className="mt-3 flex items-start gap-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 rounded-lg px-3 py-2">
+              <AlertTriangle size={13} className="flex-shrink-0 mt-0.5" />
+              <span>Couldn't upload to the backend ({uploadError}). Video preview still works, but detections need /api/upload to succeed.</span>
+            </div>
+          )}
+          {activeVideoSrc && uploadState !== "uploading" && !modelIsRunning && (
+            <div className="mt-3 flex items-start gap-2 text-xs text-orange-400 bg-orange-500/5 border border-orange-500/20 rounded-lg px-3 py-2">
+              <AlertTriangle size={13} className="flex-shrink-0 mt-0.5" />
+              <span>
+                {pollCameraId
+                  ? <>Couldn't reach <span className="font-mono">{API_BASE_URL}/api/detections/{pollCameraId}</span> — no boxes are drawn until your Flask model responds.</>
+                  : "Waiting for the backend to accept the upload before detections can start."}
+              </span>
+            </div>
+          )}
         </div>
 
-        {/* Detection stats */}
+        {/* Detection stats — all derived from real model output */}
         <div className="grid grid-cols-5 gap-3">
           {[
-            { label: "Person",    value: cam.workers,                           color: "#3b82f6" },
-            { label: "Helmet ✓",  value: cam.workers - cam.violations,          color: "#22c55e" },
-            { label: "Vest ✓",    value: cam.workers - Math.max(0, cam.violations - 1), color: "#22c55e" },
-            { label: "No Helmet", value: Math.ceil(cam.violations * 0.6),       color: "#ef4444" },
-            { label: "No Vest",   value: Math.floor(cam.violations * 0.5),      color: "#f97316" },
+            { label: "Person",    value: workerCount,      color: "#3b82f6" },
+            { label: "Helmet ✓",  value: helmetOk,          color: "#22c55e" },
+            { label: "Vest ✓",    value: vestOk,            color: "#22c55e" },
+            { label: "No Helmet", value: noHelmetCount,     color: "#ef4444" },
+            { label: "No Vest",   value: noVestCount,       color: "#f97316" },
           ].map(s => (
             <div key={s.label} className="rounded-lg border border-border bg-card p-3 text-center">
               <div className="text-2xl font-bold font-mono" style={{ color: s.color }}>{s.value}</div>
@@ -1132,56 +1370,61 @@ function LiveMonitoringPage() {
           <div className="text-sm font-semibold text-foreground mb-3">Camera Info</div>
           <div className="space-y-2 text-xs">
             {[
-              { k: "Camera ID",   v: cam.id },
-              { k: "Name",        v: cam.name },
-              { k: "Terminal",    v: cam.terminal },
-              { k: "Zone",        v: cam.zone },
-              { k: "IP Address",  v: cam.ip },
-              { k: "Uptime",      v: cam.uptime },
+              { k: "Camera ID",   v: customVideoUrl ? (uploadCameraId ?? "—") : cam.id },
+              { k: "Name",        v: customVideoUrl ? customVideoName ?? "" : cam.name },
+              { k: "Terminal",    v: customVideoUrl ? "—" : cam.terminal },
+              { k: "Zone",        v: customVideoUrl ? "—" : cam.zone },
+              { k: "Source",      v: customVideoUrl ? "Uploaded clip (server-side inference)" : cam.videoSrc || "Not assigned" },
+              { k: "IP Address",  v: customVideoUrl ? "—" : cam.ip },
             ].map(i => (
               <div key={i.k} className="flex justify-between gap-2">
                 <span className="text-muted-foreground">{i.k}</span>
-                <span className="font-mono text-foreground text-right">{i.v}</span>
+                <span className="font-mono text-foreground text-right truncate max-w-[60%]">{i.v}</span>
               </div>
             ))}
             <div className="flex justify-between items-center gap-2">
               <span className="text-muted-foreground">Status</span>
-              <StatusBadge status={cam.status} />
+              <StatusBadge status={customVideoUrl ? (modelIsRunning ? "online" : "offline") : cam.status} />
             </div>
           </div>
         </div>
 
         <div className="rounded-xl border border-border bg-card p-4">
-          <div className="text-sm font-semibold text-foreground mb-3">Performance</div>
-          <div className="space-y-3">
-            {[
-              { label: "Frame Rate",     value: fps, max: 30, unit: " fps", color: "#22c55e" },
-              { label: "Inference Time", value: inf, max: 50, unit: "ms",   color: "#3b82f6" },
-              { label: "Confidence Thr", value: 85,  max: 100, unit: "%",   color: "#f97316" },
-            ].map(m => (
-              <div key={m.label}>
-                <div className="flex justify-between text-xs mb-1.5">
-                  <span className="text-muted-foreground">{m.label}</span>
-                  <span className="font-mono font-semibold" style={{ color: m.color }}>{m.value}{m.unit}</span>
-                </div>
-                <div className="h-1 rounded-full bg-white/5">
-                  <div className="h-full rounded-full transition-all duration-500" style={{ width: `${(m.value / m.max) * 100}%`, background: m.color }} />
-                </div>
-              </div>
-            ))}
+          <div className="text-sm font-semibold text-foreground mb-3">Backend Connection</div>
+          <div className="space-y-2 text-xs">
+            <div className="flex justify-between gap-2">
+              <span className="text-muted-foreground">API base URL</span>
+              <span className="font-mono text-foreground">{API_BASE_URL}</span>
+            </div>
+            <div className="flex justify-between gap-2">
+              <span className="text-muted-foreground">Poll interval</span>
+              <span className="font-mono text-foreground">{DETECTION_POLL_MS} ms</span>
+            </div>
+            <div className="flex justify-between items-center gap-2">
+              <span className="text-muted-foreground">Status</span>
+              <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full font-medium ${modelIsRunning ? "bg-green-500/10 text-green-400" : "bg-orange-500/10 text-orange-400"}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${modelIsRunning ? "bg-green-400" : "bg-orange-400"}`} />
+                {modelIsRunning ? "Connected" : "Not connected"}
+              </span>
+            </div>
           </div>
         </div>
 
         <div className="rounded-xl border border-border bg-card p-4">
           <div className="flex items-center justify-between mb-3">
             <div className="text-sm font-semibold text-foreground">Current Violations</div>
-            {cam.violations > 0 && (
-              <span className="w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center font-bold">{cam.violations}</span>
+            {(noHelmetCount + noVestCount) > 0 && (
+              <span className="w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center font-bold">{noHelmetCount + noVestCount}</span>
             )}
           </div>
-          {cam.violations > 0 ? (
+          {!modelIsRunning ? (
+            <div className="text-center py-5">
+              <Plug size={22} className="text-muted-foreground mx-auto mb-2" />
+              <div className="text-xs text-muted-foreground">No model connected — nothing to report yet</div>
+            </div>
+          ) : (noHelmetCount + noVestCount) > 0 ? (
             <div className="space-y-2">
-              {detectionBoxes.filter(d => d.kind !== "ok").map((d, i) => (
+              {boxes.filter(d => d.kind !== "ok").map((d, i) => (
                 <div key={i} className="flex items-center gap-2 p-2.5 rounded-lg bg-red-500/5 border border-red-500/20">
                   <AlertTriangle size={12} className="text-red-400 flex-shrink-0" />
                   <div className="flex-1">
@@ -1240,17 +1483,14 @@ function CamerasPage() {
         {filtered.map(cam => (
           <div key={cam.id} className={`rounded-xl border bg-card overflow-hidden transition-all hover:border-primary/40 cursor-pointer ${cam.status === "offline" ? "border-red-500/20 opacity-60" : "border-border"}`}>
             <div className="relative bg-black" style={{ aspectRatio: "16/9" }}>
-              <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "linear-gradient(rgba(0,200,50,0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(0,200,50,0.2) 1px, transparent 1px)", backgroundSize: "20px 20px" }} />
-              {cam.status === "offline" ? (
+              {cam.status === "offline" || !cam.videoSrc ? (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
                   <WifiOff size={18} className="text-red-400/60" />
                   <span className="text-xs text-red-400/60 font-mono">NO SIGNAL</span>
                 </div>
               ) : (
                 <>
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <Camera size={24} className="text-white/5" />
-                  </div>
+                  <video src={cam.videoSrc} className="absolute inset-0 w-full h-full object-cover" autoPlay loop muted playsInline />
                   {cam.violations > 0 && (
                     <div className="absolute top-2 right-2 flex items-center gap-1 bg-red-500 text-white px-1.5 py-0.5 rounded text-xs font-bold">
                       <AlertTriangle size={9} />{cam.violations}
