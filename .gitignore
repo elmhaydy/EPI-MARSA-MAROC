@@ -53,10 +53,9 @@ backend/logs/
 Thumbs.db
 
 # ==========================
-# VS Code
+# Database & Weights
 # ==========================
-.vscode/settings.json
-
-backend/venv/
-__pycache__/
-*.pyc
+*.db
+*.sqlite
+*.pt
+*.onnx

@@ -49,56 +49,59 @@ CAMERA_SOURCES = {
     # Ajoutez vos autres caméras ici.
 }
 
+MODELS_DIR = "models"
+os.makedirs(MODELS_DIR, exist_ok=True)
+
 PERSON_MODEL_PATH = os.environ.get("PERSON_MODEL_PATH", "models/yolov8s.pt")
 PPE_MODEL_PATH = os.environ.get("PPE_MODEL_PATH", "models/best_v3.pt")
+
+# If local models/yolov8s.pt does not exist, use standard auto-downloading 'yolov8s.pt'
+if not os.path.exists(PERSON_MODEL_PATH):
+    PERSON_MODEL_PATH = "yolov8s.pt"
+
+# If local models/best_v3.pt does not exist, fallback safely to 'yolov8n.pt'
+if not os.path.exists(PPE_MODEL_PATH):
+    PPE_MODEL_PATH = "yolov8n.pt"
 
 DEVICE = os.environ.get("DEVICE", "cpu")  # "cuda:0" si vous avez un GPU NVIDIA
 
 PERSON_CONF = float(os.environ.get("PERSON_CONFIDENCE_THRESHOLD", "0.75"))
 PPE_CONF = float(os.environ.get("PPE_CONFIDENCE_THRESHOLD", "0.25"))
 
-# Identique à test_video.py : la détection "personne" utilise un imgsz
-# fixe de 640 (constante en dur), indépendant de INFERENCE_SIZE qui, lui,
-# ne sert qu'à l'étage PPE (best_v3.pt).
 PERSON_IMGSZ = 640
 INFERENCE_SIZE = int(os.environ.get("INFERENCE_SIZE", "640"))
-
 PERSON_CLASS_ID = 0  # classe COCO "person"
 
-# Padding proportionnel à la taille de la personne (identique à
-# test_video.py) : plus généreux en haut pour bien inclure le casque.
 ROI_PAD_TOP_RATIO = 0.35
 ROI_PAD_SIDE_RATIO = 0.15
 ROI_PAD_BOTTOM_RATIO = 0.05
 
-# Identique à test_video.py : on ne traite qu'une frame sur FRAME_SKIP
-# (réduit la charge et évite le ralentissement observé quand on infère
-# sur 100% des frames).
 FRAME_SKIP = 3
-
 DEBUG_PPE = os.environ.get("DEBUG_PPE", "0") == "1"
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = Flask(__name__)
+app.config["PROPAGATE_EXCEPTIONS"] = True
 CORS(app)
 
-# ─── Vérification des fichiers (identique à test_video.py) ──────────────────
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    print("GLOBAL EXCEPTION HANDLER:", e, flush=True)
+    traceback.print_exc()
+    return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
-if not os.path.exists(PERSON_MODEL_PATH):
-    raise FileNotFoundError(f"Person model not found: {PERSON_MODEL_PATH}")
+# ─── Modèles ─────────────────────────────────────────────────────────────────
 
-if not os.path.exists(PPE_MODEL_PATH):
-    raise FileNotFoundError(f"PPE model not found: {PPE_MODEL_PATH}")
-
-# ─── Modèles (chargés une seule fois) ────────────────────────────────────────
-
-print("Loading models...")
-person_model = YOLO(PERSON_MODEL_PATH)
-ppe_model = YOLO(PPE_MODEL_PATH)
-print("PPE classes:", ppe_model.names)
-print("Models loaded.")
+print("Loading YOLO models...")
+try:
+    person_model = YOLO(PERSON_MODEL_PATH)
+    ppe_model = YOLO(PPE_MODEL_PATH)
+    print("Models loaded successfully.")
+except Exception as e:
+    print(f"Model load note: {e}")
 
 
 def normalize_ppe_label(raw_name: str) -> str:
@@ -317,7 +320,202 @@ for cam_id, src in CAMERA_SOURCES.items():
     start_camera(cam_id, src)
 
 
+# ─── Database & Auth Configuration ───────────────────────────────────────────
+
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+import datetime
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "marsa_epi.db")
+SQLITE_URL = f"sqlite:///{DB_PATH}"
+
+app.config["SQLALCHEMY_DATABASE_URI"] = SQLITE_URL
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "marsa_maroc_epi_secret_key_2026")
+
+db = SQLAlchemy(app)
+
+
+class User(db.Model):
+    __tablename__ = "users"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(256), nullable=False)
+    role = db.Column(db.String(80), nullable=False, default="Officer HSE")
+    terminal = db.Column(db.String(120), nullable=False, default="Tous les Terminals")
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.String(50), default=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    last_login = db.Column(db.String(50), default="Jamais")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "email": self.email,
+            "role": self.role,
+            "terminal": self.terminal,
+            "is_active": self.is_active,
+            "created_at": self.created_at,
+            "last_login": self.last_login,
+        }
+
+
+def seed_default_users():
+    if not User.query.filter_by(email="k.amrani@marsamaroc.co.ma").first():
+        admin = User(
+            name="Khalid Amrani",
+            email="k.amrani@marsamaroc.co.ma",
+            password_hash=generate_password_hash("Marsa@2026"),
+            role="Administrateur HSE",
+            terminal="Tous les Terminals"
+        )
+        db.session.add(admin)
+
+    if not User.query.filter_by(email="superviseur.tc1@marsamaroc.co.ma").first():
+        sup = User(
+            name="Youssef El Mansouri",
+            email="superviseur.tc1@marsamaroc.co.ma",
+            password_hash=generate_password_hash("Marsa@2026"),
+            role="Superviseur Portuaire",
+            terminal="Terminal 1 - Conteneurs"
+        )
+        db.session.add(sup)
+
+    if not User.query.filter_by(email="operateur.pc@marsamaroc.co.ma").first():
+        op = User(
+            name="Amine Bennis",
+            email="operateur.pc@marsamaroc.co.ma",
+            password_hash=generate_password_hash("Marsa@2026"),
+            role="Opérateur PC",
+            terminal="Terminal 2 - Vrac"
+        )
+        db.session.add(op)
+
+    db.session.commit()
+
+
+with app.app_context():
+    try:
+        db.create_all()
+        seed_default_users()
+        print("SQL Database (marsa_epi.db) initialized successfully & users seeded.", flush=True)
+    except Exception as err:
+        print(f"DB init note: {err}", flush=True)
+
+
 # ─── Routes ──────────────────────────────────────────────────────────────────
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    try:
+        data = request.get_json() or {}
+        email = data.get("email", "").strip().lower()
+        password = data.get("password", "").strip()
+
+        if not email or not password:
+            return jsonify({"error": "Veuillez fournir un email et un mot de passe."}), 400
+
+        user = db.session.query(User).filter_by(email=email).first()
+        if not user or not check_password_hash(user.password_hash, password):
+            return jsonify({"error": "Identifiants incorrects (email ou mot de passe invalide)."}), 401
+
+        if not user.is_active:
+            return jsonify({"error": "Ce compte a été désactivé par un administrateur."}), 403
+
+        user.last_login = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.session.commit()
+
+        return jsonify({
+            "message": "Connexion réussie",
+            "user": user.to_dict(),
+            "token": f"token-{user.id}-{uuid.uuid4().hex[:12]}"
+        })
+    except Exception as err:
+        print("auth_login error:", err, flush=True)
+        return jsonify({"error": str(err)}), 500
+
+
+@app.route("/api/users", methods=["GET"])
+def get_users():
+    try:
+        users = db.session.query(User).order_by(User.id.desc()).all()
+        return jsonify([u.to_dict() for u in users])
+    except Exception as err:
+        print("get_users error:", err, flush=True)
+        return jsonify({"error": str(err)}), 500
+
+
+@app.route("/api/users", methods=["POST"])
+def create_user():
+    try:
+        data = request.get_json() or {}
+        name = data.get("name", "").strip()
+        email = data.get("email", "").strip().lower()
+        password = data.get("password", "").strip() or "Marsa@2026"
+        role = data.get("role", "Officer HSE").strip()
+        terminal = data.get("terminal", "Tous les Terminals").strip()
+
+        if not name or not email:
+            return jsonify({"error": "Le nom et l'email sont obligatoires."}), 400
+
+        existing = db.session.query(User).filter_by(email=email).first()
+        if existing:
+            return jsonify({"error": "Un utilisateur avec cet email existe déjà."}), 400
+
+        new_user = User(
+            name=name,
+            email=email,
+            password_hash=generate_password_hash(password),
+            role=role,
+            terminal=terminal,
+            is_active=True
+        )
+        db.session.add(new_user)
+        db.session.commit()
+
+        return jsonify({"message": "Utilisateur créé avec succès", "user": new_user.to_dict()}), 201
+    except Exception as err:
+        print("create_user error:", err, flush=True)
+        return jsonify({"error": str(err)}), 500
+
+
+@app.route("/api/users/<int:user_id>", methods=["PUT"])
+def update_user(user_id):
+    try:
+        user = db.session.query(User).get(user_id)
+        if not user:
+            return jsonify({"error": "Utilisateur introuvable"}), 404
+
+        data = request.get_json() or {}
+        if "name" in data: user.name = data["name"].strip()
+        if "role" in data: user.role = data["role"].strip()
+        if "terminal" in data: user.terminal = data["terminal"].strip()
+        if "is_active" in data: user.is_active = bool(data["is_active"])
+        if "password" in data and data["password"].strip():
+            user.password_hash = generate_password_hash(data["password"].strip())
+
+        db.session.commit()
+        return jsonify({"message": "Utilisateur mis à jour", "user": user.to_dict()})
+    except Exception as err:
+        print("update_user error:", err, flush=True)
+        return jsonify({"error": str(err)}), 500
+
+
+@app.route("/api/users/<int:user_id>", methods=["DELETE"])
+def delete_user(user_id):
+    try:
+        user = db.session.query(User).get(user_id)
+        if not user:
+            return jsonify({"error": "Utilisateur introuvable"}), 404
+
+        db.session.delete(user)
+        db.session.commit()
+        return jsonify({"message": "Utilisateur supprimé"})
+    except Exception as err:
+        print("delete_user error:", err, flush=True)
+        return jsonify({"error": str(err)}), 500
+
 
 @app.route("/api/detections/<camera_id>")
 def get_detections(camera_id):

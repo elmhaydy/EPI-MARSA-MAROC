@@ -7,9 +7,13 @@ import {
   LayoutDashboard, Monitor, Camera, Bell, History, FileText, Settings,
   Shield, AlertTriangle, CheckCircle, WifiOff, Search, Download, Eye,
   Check, User, Cpu, MapPin, TrendingUp, TrendingDown, Sun, Moon,
-  Maximize, ChevronLeft, ChevronRight, Plus, Edit, Trash2, Radio, Zap,
-  Activity, Play, Pause, Upload, PlugZap, Plug,
+  Maximize, ChevronLeft, ChevronRight, ChevronDown, Plus, Edit, Trash2, Radio, Zap,
+  Activity, Play, Pause, Upload, PlugZap, Plug, LogOut, LogIn, UserPlus, Users,
 } from "lucide-react";
+import { AuthPage } from "./AuthPage";
+import { UsersPage } from "./UsersPage";
+import marsaLogo from "../../asset/img/MARSA_LOGO.png";
+
 
 
 // ─── Backend Configuration ─────────────────────────────────────────────────
@@ -123,7 +127,7 @@ const violationTypePie = [
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Page = "dashboard" | "monitoring" | "cameras" | "alerts" | "incidents" | "reports" | "settings" | "localisation";
+type Page = "dashboard" | "monitoring" | "cameras" | "alerts" | "incidents" | "reports" | "settings" | "localisation" | "users" | "login";
 
 type DetectionBox = {
   x: number; y: number; w: number; h: number;
@@ -147,6 +151,7 @@ const navItems: { id: Page; label: string; icon: React.ElementType; badge?: numb
   { id: "alerts",     label: "Active Alerts",    icon: Bell, badge: 2 },
   { id: "incidents",  label: "Incident History", icon: History },
   { id: "reports",    label: "Reports",          icon: FileText },
+  { id: "users",      label: "Utilisateurs",     icon: Users },
   { id: "settings",   label: "Settings",         icon: Settings },
 ];
 
@@ -285,37 +290,45 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-function Sidebar({ page, setPage, collapsed, setCollapsed }: {
+function Sidebar({ page, setPage, collapsed, setCollapsed, currentUser }: {
   page: Page; setPage: (p: Page) => void; collapsed: boolean; setCollapsed: (v: boolean) => void;
+  currentUser: { name: string; email: string; role: string; terminal: string } | null;
 }) {
+  const isAdmin = !!(currentUser?.role && (currentUser.role.toLowerCase().includes("admin") || currentUser.role.toLowerCase().includes("administrateur")));
+
+  const visibleNavItems = navItems.filter(item => {
+    if (item.id === "users" && !isAdmin) return false;
+    return true;
+  });
+
   return (
     <aside
       className="flex flex-col h-full border-r border-sidebar-border transition-all duration-300 flex-shrink-0"
       style={{ width: collapsed ? 60 : 232, background: "var(--sidebar)" }}
     >
-      {/* Brand */}
-      <div className="flex items-center gap-3 px-3 py-4 border-b border-sidebar-border">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: "#f97316" }}>
-          <Shield size={16} className="text-white" />
+      {/* Brand Header */}
+      <div className="flex items-center justify-between px-3 py-4 border-b border-sidebar-border gap-2">
+        <div className="flex-1 flex items-center justify-start min-w-0 px-1">
+          <img
+            src={marsaLogo}
+            alt="Marsa Maroc Logo"
+            className={`${collapsed ? "h-6" : "h-10"} w-auto max-w-full object-contain filter brightness-0 invert opacity-95 hover:opacity-100 transition-opacity`}
+            style={{ mixBlendMode: "screen" }}
+          />
         </div>
-        {!collapsed && (
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-bold text-white tracking-wider leading-none">MARSA MAROC</div>
-            <div className="text-xs mt-0.5 truncate" style={{ color: "var(--sidebar-foreground)", fontSize: "10px" }}>PPE Detection System</div>
-          </div>
-        )}
         <button
           onClick={() => setCollapsed(!collapsed)}
-          className="p-1 rounded transition-colors flex-shrink-0"
+          className="p-1.5 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
           style={{ color: "var(--sidebar-foreground)" }}
+          title={collapsed ? "Agrandir le menu" : "Réduire le menu"}
         >
-          {collapsed ? <ChevronRight size={13} /> : <ChevronLeft size={13} />}
+          {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
         </button>
       </div>
 
       {/* Nav */}
       <nav className="flex-1 overflow-y-auto py-2 px-2 space-y-0.5">
-        {navItems.map((item) => {
+        {visibleNavItems.map((item) => {
           const active = page === item.id;
           return (
             <button
@@ -390,13 +403,47 @@ const pageLabels: Record<Page, string> = {
   alerts:     "Active Alerts",
   incidents:  "Incident History",
   reports:    "Reports & Analytics",
+  users:      "Gestion des Utilisateurs",
   settings:   "System Settings",
+  login:      "Espace Connexion",
 };
 
-function TopBar({ page, darkMode, setDarkMode }: { page: Page; darkMode: boolean; setDarkMode: (v: boolean) => void }) {
+function TopBar({
+  page,
+  darkMode,
+  setDarkMode,
+  currentUser,
+  onLogout,
+  setPage,
+}: {
+  page: Page;
+  darkMode: boolean;
+  setDarkMode: (v: boolean) => void;
+  currentUser: { name: string; email: string; role: string; terminal: string } | null;
+  onLogout: () => void;
+  setPage: (p: Page) => void;
+}) {
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const dt = useDateTime();
   const date = dt.toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
   const time = dt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  const getInitials = (name?: string) => {
+    if (!name) return "KA";
+    return name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
+  };
+
+  // Close dropdown on click outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   return (
     <header className="h-13 flex items-center px-5 border-b border-border bg-card/60 backdrop-blur-sm gap-4 flex-shrink-0" style={{ height: 52 }}>
@@ -423,19 +470,106 @@ function TopBar({ page, darkMode, setDarkMode }: { page: Page; darkMode: boolean
         <button
           onClick={() => setDarkMode(!darkMode)}
           className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors"
+          title={darkMode ? "Mode Clair" : "Mode Sombre"}
         >
           {darkMode ? <Sun size={15} /> : <Moon size={15} />}
         </button>
         <div className="h-4 w-px bg-border" />
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white flex-shrink-0" style={{ background: "#f97316" }}>
-            KA
+
+        {currentUser ? (
+          <div className="relative" ref={menuRef}>
+            {/* User Profile Button Trigger */}
+            <button
+              onClick={() => setDropdownOpen(!dropdownOpen)}
+              className="flex items-center gap-2.5 px-2.5 py-1 rounded-xl hover:bg-muted/50 transition-all border border-transparent hover:border-border/60"
+            >
+              <div className="relative">
+                <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white shadow-md flex-shrink-0" style={{ background: "#f97316" }}>
+                  {getInitials(currentUser.name)}
+                </div>
+                <span className="absolute bottom-0 right-0 w-2 h-2 bg-green-500 rounded-full border-2 border-card" />
+              </div>
+              <div className="hidden md:block text-left text-xs">
+                <div className="font-semibold text-foreground leading-none">{currentUser.name}</div>
+                <div className="text-muted-foreground mt-0.5 text-[11px]">{currentUser.role}</div>
+              </div>
+              <ChevronDown size={14} className={`text-muted-foreground transition-transform duration-200 ${dropdownOpen ? "rotate-180 text-primary" : ""}`} />
+            </button>
+
+            {/* Dropdown Menu Popup */}
+            {dropdownOpen && (
+              <div className="absolute right-0 mt-2 w-72 rounded-2xl bg-card border border-border/80 shadow-2xl p-3.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150 backdrop-blur-xl">
+                {/* User Header Info Card */}
+                <div className="flex items-center gap-3 p-2.5 rounded-xl bg-muted/40 border border-border/40 mb-3">
+                  <div className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold text-white shadow-md flex-shrink-0" style={{ background: "#f97316" }}>
+                    {getInitials(currentUser.name)}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-sm text-foreground truncate">{currentUser.name}</div>
+                    <div className="text-xs text-muted-foreground truncate">{currentUser.email}</div>
+                    <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                      <span className="px-2 py-0.5 rounded-md bg-primary/10 text-primary text-[10px] font-medium border border-primary/20">
+                        {currentUser.role}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-1 text-xs">
+                  {currentUser?.role && (currentUser.role.toLowerCase().includes("admin") || currentUser.role.toLowerCase().includes("administrateur")) && (
+                    <button
+                      onClick={() => { setPage("users"); setDropdownOpen(false); }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-foreground hover:bg-primary/10 hover:text-primary transition-colors text-left font-medium"
+                    >
+                      <Users size={15} className="text-primary" />
+                      <span>Gestion des Utilisateurs</span>
+                    </button>
+                  )}
+
+                  <button
+                    onClick={() => { setPage("settings"); setDropdownOpen(false); }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-foreground hover:bg-primary/10 hover:text-primary transition-colors text-left font-medium"
+                  >
+                    <Settings size={15} className="text-muted-foreground" />
+                    <span>Paramètres du Système</span>
+                  </button>
+
+                  <button
+                    onClick={() => setDarkMode(!darkMode)}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-foreground hover:bg-muted/50 transition-colors text-left font-medium"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      {darkMode ? <Sun size={15} className="text-amber-400" /> : <Moon size={15} className="text-indigo-400" />}
+                      <span>{darkMode ? "Mode Clair" : "Mode Sombre"}</span>
+                    </div>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                      {darkMode ? "Sombre" : "Clair"}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="my-2.5 h-px bg-border/60" />
+
+                <button
+                  onClick={() => { setDropdownOpen(false); onLogout(); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-red-500 hover:bg-red-500/10 transition-colors font-medium text-xs"
+                >
+                  <LogOut size={15} />
+                  <span>Se Déconnecter</span>
+                </button>
+              </div>
+            )}
           </div>
-          <div className="hidden md:block text-xs">
-            <div className="font-semibold text-foreground leading-none">K. Amrani</div>
-            <div className="text-muted-foreground mt-0.5">Safety Officer</div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage("login")}
+              className="px-3 py-1 rounded-lg text-xs font-medium bg-primary text-white hover:opacity-90 transition-opacity"
+            >
+              Connexion
+            </button>
           </div>
-        </div>
+        )}
       </div>
     </header>
   );
@@ -2039,23 +2173,84 @@ function SettingsPage({ darkMode, setDarkMode }: { darkMode: boolean; setDarkMod
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [page, setPage]         = useState<Page>("dashboard");
-  const [darkMode, setDarkMode] = useState(true);
+  const [page, setPage] = useState<Page>(() => {
+    const saved = localStorage.getItem("marsa_page");
+    return (saved as Page) || "dashboard";
+  });
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    const saved = localStorage.getItem("marsa_theme");
+    return saved !== null ? saved === "dark" : false; // Default to Light Mode (false)
+  });
   const [collapsed, setCollapsed] = useState(false);
+  const [currentUser, setCurrentUser] = useState<{ name: string; email: string; role: string; terminal: string } | null>(() => {
+    const saved = localStorage.getItem("marsa_user");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {}
+    }
+    return {
+      name: "Khalid Amrani",
+      email: "k.amrani@marsamaroc.co.ma",
+      role: "Administrateur HSE",
+      terminal: "Tous les Terminals",
+    };
+  });
+
+  useEffect(() => {
+    localStorage.setItem("marsa_page", page);
+  }, [page]);
+
+  useEffect(() => {
+    localStorage.setItem("marsa_theme", darkMode ? "dark" : "light");
+  }, [darkMode]);
+
+  useEffect(() => {
+    if (currentUser) {
+      localStorage.setItem("marsa_user", JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem("marsa_user");
+    }
+  }, [currentUser]);
 
   // Convert VIOLATIONS to a format compatible with the localisation view
   const localisationViolations = VIOLATIONS.map(v => ({
     ...v,
-    // The localisation view expects the zone to be formatted like "Zone C – Quai de chargement"
-    // but we keep the original zone format
   }));
+
+  const isAdmin = !!(currentUser?.role && (currentUser.role.toLowerCase().includes("admin") || currentUser.role.toLowerCase().includes("administrateur")));
+
+  if (page === "login") {
+    return (
+      <div className={darkMode ? "dark" : ""}>
+        <AuthPage
+          onLoginSuccess={(user) => {
+            setCurrentUser(user);
+            setPage("dashboard");
+          }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className={darkMode ? "dark" : ""}>
       <div className="flex h-screen overflow-hidden bg-background font-sans">
-        <Sidebar page={page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} />
+        <Sidebar page={page} setPage={setPage} collapsed={collapsed} setCollapsed={setCollapsed} currentUser={currentUser} />
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-          <TopBar page={page} darkMode={darkMode} setDarkMode={setDarkMode} />
+          <TopBar
+            page={page}
+            darkMode={darkMode}
+            setDarkMode={setDarkMode}
+            currentUser={currentUser}
+            onLogout={() => {
+              setCurrentUser(null);
+              localStorage.removeItem("marsa_user");
+              localStorage.setItem("marsa_page", "login");
+              setPage("login");
+            }}
+            setPage={setPage}
+          />
           <main className="flex-1 overflow-auto p-5">
             {page === "dashboard"  && <DashboardPage />}
             {page === "monitoring" && <LiveMonitoringPage />}
@@ -2064,6 +2259,25 @@ export default function App() {
             {page === "alerts"     && <AlertsPage />}
             {page === "incidents"  && <IncidentHistoryPage />}
             {page === "reports"    && <ReportsPage />}
+            {page === "users"      && (
+              isAdmin ? <UsersPage /> : (
+                <div className="flex flex-col items-center justify-center h-[70vh] text-center p-8 bg-card rounded-2xl border border-border/80 shadow-xl max-w-lg mx-auto my-auto">
+                  <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-500 mb-4">
+                    <Shield size={32} />
+                  </div>
+                  <h2 className="text-lg font-bold text-foreground">Accès Réservé aux Administrateurs HSE</h2>
+                  <p className="text-xs text-muted-foreground mt-2 leading-relaxed">
+                    Le module de <strong className="text-foreground">Gestion des Utilisateurs</strong> est strictement restreint aux Administrateurs HSE de Marsa Maroc.
+                  </p>
+                  <button
+                    onClick={() => setPage("dashboard")}
+                    className="mt-6 px-4 py-2 rounded-xl bg-primary text-white text-xs font-semibold hover:opacity-90 transition-opacity shadow-md"
+                  >
+                    Retour au Tableau de Bord
+                  </button>
+                </div>
+              )
+            )}
             {page === "settings"   && <SettingsPage darkMode={darkMode} setDarkMode={setDarkMode} />}
           </main>
         </div>
