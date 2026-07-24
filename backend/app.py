@@ -1,30 +1,32 @@
 """
-Marsa Maroc PPE Detection — Flask Inference Backend
+Marsa Maroc — PPE Detection Backend (Flask)
 -----------------------------------------------------------------------------
-Serves real-time YOLOv8 PPE detections to the React dashboard.
+Reproduit exactement la logique de `test_video.py` (aucun tracking, aucun
+lissage temporel, aucun vote) — juste exposée via une API Flask pour le
+frontend React :
 
-Single-model pipeline (last.pt), trained on Person / Helmet / NoHelmet /
-Vest / NoVest together. Each Person box is matched against the PPE boxes
-whose centers fall inside it, then reduced to a single verdict:
+    Frame
+      │
+      ▼
+    YOLOv8 COCO (Person Detection)
+      │
+      ▼
+    ROI de chaque personne (padding proportionnel, comme test_video.py)
+      │
+      ▼
+    best_v3.pt -> Helmet / NoHelmet / Vest / NoVest
+      │
+      ▼
+    Décision IMMÉDIATE, frame par frame :
+        Helmet ET Vest détectés -> CONFORM
+        Sinon                   -> NON-CONFORM
 
-    - "Conforme"      -> helmet AND vest both detected -> green box
-    - "Non Conforme"  -> helmet missing and/or vest missing -> red box
-
-No per-item Helmet/NoHelmet/Vest/NoVest labels are shown — only the
-aggregated per-person verdict.
-
-Each camera (a recorded CCTV clip today, an RTSP URL tomorrow) runs in its
-own background thread that continuously reads frames, runs inference, and
-caches the latest result in memory. The React frontend never touches OpenCV
-or YOLO directly — it just polls:
+Chaque frame est traitée indépendamment des autres : pas de tracker, pas
+d'historique, pas d'état "ANALYZING". Le frontend interroge simplement :
 
     GET  /api/detections/<camera_id>
     POST /api/upload            (multipart "video" field)
-
-Run it with:
-    pip install -r requirements.txt
-    $env:PERSON_MODEL_PATH="models/last.pt"
-    python app.py
+    GET  /api/health
 """
 
 import os
@@ -39,73 +41,81 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from ultralytics import YOLO
 
-# ─── Configuration ───────────────────────────────────────────────────────────
+# ─── Configuration (mêmes valeurs que test_video.py) ─────────────────────────
 
-# Map camera IDs (must match the `id` fields in the frontend's `cameras`
-# array) to a video source. A source can be:
-#   - a path to a local .mp4 file (today — simulates a live feed by looping)
-#   - an rtsp:// URL (tomorrow, once you have real camera access — nothing
-#     else in this file needs to change)
 CAMERA_SOURCES = {
     "CAM-001": "videos/CAM-001.mp4",
     "CAM-005": "videos/CAM-005.mp4",
-    # Add the rest of your 16 cameras here as clips become available.
-    # Cameras you don't map are simply "no clip assigned" in the UI.
+    # Ajoutez vos autres caméras ici.
 }
 
-MODEL_PATH = os.environ.get("PERSON_MODEL_PATH", "models/best.pt")
-CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.25"))
+PERSON_MODEL_PATH = os.environ.get("PERSON_MODEL_PATH", "models/yolov8s.pt")
+PPE_MODEL_PATH = os.environ.get("PPE_MODEL_PATH", "models/best_v3.pt")
 
-# How far outside a person's box (as a fraction of that box's width/height)
-# a helmet/vest detection's center can still fall and be considered "on"
-# that person. Bump this up if helmets are getting missed (e.g. top-down
-# CCTV angle where the helmet sits above the person box), lower it if
-# gear is getting cross-matched to the wrong person in crowded frames.
-MATCH_TOLERANCE = float(os.environ.get("MATCH_TOLERANCE", "0.1"))
+DEVICE = os.environ.get("DEVICE", "cpu")  # "cuda:0" si vous avez un GPU NVIDIA
+
+PERSON_CONF = float(os.environ.get("PERSON_CONFIDENCE_THRESHOLD", "0.75"))
+PPE_CONF = float(os.environ.get("PPE_CONFIDENCE_THRESHOLD", "0.25"))
+
+# Identique à test_video.py : la détection "personne" utilise un imgsz
+# fixe de 640 (constante en dur), indépendant de INFERENCE_SIZE qui, lui,
+# ne sert qu'à l'étage PPE (best_v3.pt).
+PERSON_IMGSZ = 640
+INFERENCE_SIZE = int(os.environ.get("INFERENCE_SIZE", "640"))
+
+PERSON_CLASS_ID = 0  # classe COCO "person"
+
+# Padding proportionnel à la taille de la personne (identique à
+# test_video.py) : plus généreux en haut pour bien inclure le casque.
+ROI_PAD_TOP_RATIO = 0.35
+ROI_PAD_SIDE_RATIO = 0.15
+ROI_PAD_BOTTOM_RATIO = 0.05
+
+# Identique à test_video.py : on ne traite qu'une frame sur FRAME_SKIP
+# (réduit la charge et évite le ralentissement observé quand on infère
+# sur 100% des frames).
+FRAME_SKIP = 3
+
+DEBUG_PPE = os.environ.get("DEBUG_PPE", "0") == "1"
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = Flask(__name__)
-CORS(app)  # the Vite dev server (localhost:5173) is a different origin
+CORS(app)
 
-# ─── Model (loaded once, shared by every camera thread) ──────────────────────
+# ─── Vérification des fichiers (identique à test_video.py) ──────────────────
 
-print("Loading model...")
-person_model = YOLO(MODEL_PATH)
-print("Model loaded.")
+if not os.path.exists(PERSON_MODEL_PATH):
+    raise FileNotFoundError(f"Person model not found: {PERSON_MODEL_PATH}")
 
-# Same idea as normalize_class_name() from your training notebook — adjust
-# these keys to whatever your dataset's raw class names actually are.
-PPE_CLASS_MAP = {
-    "helmet": "Helmet", "no-helmet": "No Helmet", "no_helmet": "No Helmet", "nohelmet": "No Helmet",
-    "vest": "Vest", "no-vest": "No Vest", "no_vest": "No Vest", "novest": "No Vest",
-    "person": "Person",
-}
+if not os.path.exists(PPE_MODEL_PATH):
+    raise FileNotFoundError(f"PPE model not found: {PPE_MODEL_PATH}")
+
+# ─── Modèles (chargés une seule fois) ────────────────────────────────────────
+
+print("Loading models...")
+person_model = YOLO(PERSON_MODEL_PATH)
+ppe_model = YOLO(PPE_MODEL_PATH)
+print("PPE classes:", ppe_model.names)
+print("Models loaded.")
 
 
-def box_center_inside(inner, outer, tolerance=0.0):
-    """True if the center of `inner` (x1,y1,x2,y2) falls inside `outer`,
-    expanded by `tolerance` fraction on each side. Simple and robust for
-    matching a small PPE box (helmet/vest) to the person box it belongs to.
-    """
-    ix1, iy1, ix2, iy2 = inner
-    ox1, oy1, ox2, oy2 = outer
-    cx, cy = (ix1 + ix2) / 2, (iy1 + iy2) / 2
+def normalize_ppe_label(raw_name: str) -> str:
+    """Même normalisation que test_video.py: minuscule, sans tirets uniquement
+    (test_video.py ne retire PAS les underscores — on ne le fait pas non plus,
+    pour ne jamais faire diverger la classification helmet/vest/nohelmet/novest)."""
+    return raw_name.lower().replace("-", "")
 
-    ow, oh = ox2 - ox1, oy2 - oy1
-    ox1 -= ow * tolerance
-    ox2 += ow * tolerance
-    oy1 -= oh * tolerance
-    oy2 += oh * tolerance
 
-    return ox1 <= cx <= ox2 and oy1 <= cy <= oy2
-
+# ─── État partagé par caméra ──────────────────────────────────────────────────
 
 @dataclass
 class CameraState:
     workers: int = 0
     compliant: int = 0
+    frame_width: int = 0
+    frame_height: int = 0
     boxes: list = field(default_factory=list)
     last_update: float = 0.0
     running: bool = True
@@ -115,74 +125,136 @@ class CameraState:
 camera_states: dict[str, CameraState] = {}
 camera_lock = threading.Lock()
 
+# Les deux modèles (person_model, ppe_model) sont chargés UNE SEULE FOIS et
+# partagés par tous les threads caméra. Ultralytics/PyTorch ne garantit pas
+# la thread-safety d'appels predict() concurrents sur la même instance de
+# modèle (état interne partagé : predictor, buffers, post-traitement NMS).
+# Sans verrou, deux caméras qui infèrent en même temps peuvent mélanger
+# leurs résultats -> "personnes" fantômes détectées sur du fond, statuts
+# incohérents. Ce verrou sérialise tous les appels au modèle, exactement
+# comme dans test_video.py qui, étant mono-thread, n'a jamais ce problème.
+model_lock = threading.Lock()
+
 
 def run_inference(frame):
-    """Single-pass inference with last.pt (Person, Helmet, NoHelmet, Vest,
-    NoVest all trained together — no crop/ROI step). Each Person box is
-    reduced to a single Conforme / Non Conforme verdict based on whether a
-    Helmet and Vest were matched to it. Returns a list of boxes in
-    PERCENTAGE coordinates (0-100), one box per detected person:
-        {x, y, w, h, label, conf, kind}
-    """
-    h, w = frame.shape[:2]
-    results = person_model.predict(frame, verbose=False, conf=CONFIDENCE_THRESHOLD)[0]
+    """Pipeline en une seule passe, identique à test_video.py : chaque
+    frame est traitée indépendamment, sans aucun état conservé d'une frame
+    à l'autre (pas de tracker, pas d'historique, pas de vote)."""
+    frame_h, frame_w = frame.shape[:2]
 
-    persons = []
-    ppe_items = []  # (label, xyxy, conf)
+    with model_lock:
+        person_results = person_model.predict(
+            frame,
+            classes=[PERSON_CLASS_ID],
+            conf=PERSON_CONF,
+            imgsz=PERSON_IMGSZ,
+            device=DEVICE,
+            verbose=False,
+        )
 
-    for box in results.boxes:
-        cls_name = person_model.names[int(box.cls[0])].lower()
-        mapped = PPE_CLASS_MAP.get(cls_name, cls_name)
-        xyxy = box.xyxy[0].tolist()
-        conf = float(box.conf[0])
+    people = []
 
-        if mapped == "Person":
-            persons.append({"xyxy": xyxy, "conf": conf})
+    for person in person_results[0].boxes:
+        x1, y1, x2, y2 = map(int, person.xyxy[0].tolist())
+        person_conf = float(person.conf[0])
+
+        box_w = x2 - x1
+        box_h = y2 - y1
+
+        pad_top = int(box_h * ROI_PAD_TOP_RATIO)
+        pad_bottom = int(box_h * ROI_PAD_BOTTOM_RATIO)
+        pad_side = int(box_w * ROI_PAD_SIDE_RATIO)
+
+        # Comme dans test_video.py : x1,y1,x2,y2 sont ré-écrasés par la boîte
+        # PADDÉE. C'est cette boîte (et pas la boîte brute de détection) qui
+        # sert à la fois pour découper la ROI et comme "boîte personne" finale.
+        x1 = max(0, x1 - pad_side)
+        y1 = max(0, y1 - pad_top)
+        x2 = min(frame_w, x2 + pad_side)
+        y2 = min(frame_h, y2 + pad_bottom)
+
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            continue
+
+        with model_lock:
+            ppe_results = ppe_model.predict(
+                roi,
+                conf=PPE_CONF,
+                imgsz=INFERENCE_SIZE,
+                device=DEVICE,
+                verbose=False,
+            )
+
+        helmet = vest = False
+        ppe_detections = []
+
+        for box in ppe_results[0].boxes:
+            cls = int(box.cls[0])
+            conf = float(box.conf[0])
+            raw_label = ppe_model.names[cls]
+            normalized = normalize_ppe_label(raw_label)
+
+            if normalized == "helmet":
+                helmet = True
+            elif normalized == "vest":
+                vest = True
+
+            px1, py1, px2, py2 = map(int, box.xyxy[0].tolist())
+            ppe_detections.append({
+                "label": raw_label,
+                "bbox": [x1 + px1, y1 + py1, x1 + px2, y1 + py2],
+                "conf": round(conf, 3),
+                "is_negative": normalized in ("nohelmet", "novest"),
+            })
+
+        if DEBUG_PPE:
+            print(f"[DEBUG_PPE] person_conf={person_conf:.2f} roi={roi.shape[1]}x{roi.shape[0]} "
+                  f"helmet={helmet} vest={vest}")
+
+        # Décision immédiate, frame par frame — exactement comme test_video.py :
+        # seule la présence positive de Helmet/Vest compte.
+        missing = []
+        if not helmet:
+            missing.append("Helmet")
+        if not vest:
+            missing.append("Vest")
+
+        status = "CONFORM" if not missing else "NON-CONFORM"
+
+        if status == "CONFORM":
+            text = "CONFORM"
+        elif missing == ["Helmet"]:
+            text = "NON-CONFORM - Helmet Missing"
+        elif missing == ["Vest"]:
+            text = "NON-CONFORM - Vest Missing"
         else:
-            ppe_items.append((mapped, xyxy, conf))
+            text = "NON-CONFORM - Helmet & Vest Missing"
 
-    output_boxes = []
+        people.append({
+            # ── Format principal ──
+            "bbox": [x1, y1, x2, y2],
+            "status": status,          # "CONFORM" | "NON-CONFORM"
+            "missing": missing,
+            "text": text,
+            "color": "green" if status == "CONFORM" else "red",
+            "confidence": round(person_conf, 3),
+            "ppe_detections": ppe_detections,
 
-    for p in persons:
-        x1, y1, x2, y2 = p["xyxy"]
-
-        has_helmet = False
-        has_vest = False
-        matched_confs = []
-
-        for label, item_xyxy, item_conf in ppe_items:
-            if not box_center_inside(item_xyxy, p["xyxy"], tolerance=MATCH_TOLERANCE):
-                continue
-            if label == "Helmet":
-                has_helmet = True
-                matched_confs.append(item_conf)
-            elif label == "Vest":
-                has_vest = True
-                matched_confs.append(item_conf)
-            # "No Helmet" / "No Vest" detections are ignored — absence of a
-            # positive "Helmet"/"Vest" match is what drives the verdict.
-
-        is_compliant = has_helmet and has_vest
-        display_conf = (sum(matched_confs) / len(matched_confs)) if matched_confs else p["conf"]
-
-        output_boxes.append({
-            "x": round(x1 / w * 100, 1),
-            "y": round(y1 / h * 100, 1),
-            "w": round((x2 - x1) / w * 100, 1),
-            "h": round((y2 - y1) / h * 100, 1),
-            "label": "Conforme" if is_compliant else "Non Conforme",
-            "conf": round(display_conf * 100, 1),
-            "kind": "ok" if is_compliant else "violation",
+            # ── Compatibilité avec l'ancien frontend React (pourcentages) ──
+            "x": round(x1 / frame_w * 100, 1),
+            "y": round(y1 / frame_h * 100, 1),
+            "w": round((x2 - x1) / frame_w * 100, 1),
+            "h": round((y2 - y1) / frame_h * 100, 1),
+            "label": text,
+            "conf": round(person_conf * 100, 1),
+            "kind": "ok" if status == "CONFORM" else "violation",
         })
 
-    return output_boxes
+    return people
 
 
 def camera_worker(camera_id: str, source: str):
-    """Continuously reads frames from `source` and refreshes the cached
-    detections for `camera_id`. Loops recorded clips to simulate a live
-    feed; for an rtsp:// source it just keeps reading until the stream
-    drops."""
     is_file = not source.startswith("rtsp://")
     cap = cv2.VideoCapture(source)
 
@@ -191,35 +263,46 @@ def camera_worker(camera_id: str, source: str):
             camera_states[camera_id].error = f"Could not open source: {source}"
         return
 
+    frame_count = 0
+
     while camera_states[camera_id].running:
         ok, frame = cap.read()
         if not ok:
             if is_file:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # loop the clip like a live feed
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # boucle le clip
+                frame_count = 0
                 continue
             with camera_lock:
                 camera_states[camera_id].error = "Stream ended"
             break
 
+        frame_count += 1
+
+        # Identique à test_video.py : une frame sur FRAME_SKIP seulement.
+        if frame_count % FRAME_SKIP != 0:
+            continue
+
         try:
-            boxes = run_inference(frame)
-        except Exception as exc:  # keep the worker alive on a bad frame
+            people = run_inference(frame)
+        except Exception as exc:
             with camera_lock:
                 camera_states[camera_id].error = str(exc)
             continue
 
-        compliant = sum(1 for b in boxes if b["kind"] == "ok")
+        compliant = sum(1 for p in people if p["status"] == "CONFORM")
+        frame_h, frame_w = frame.shape[:2]
 
         with camera_lock:
             state = camera_states[camera_id]
-            state.workers = len(boxes)
+            state.workers = len(people)
             state.compliant = compliant
-            state.boxes = boxes
+            state.frame_width = frame_w
+            state.frame_height = frame_h
+            state.boxes = people
             state.last_update = time.time()
             state.error = None
 
-        # Pace inference roughly to real playback speed — tune for your GPU.
-        time.sleep(0.15)
+        time.sleep(0.03)
 
     cap.release()
 
@@ -245,6 +328,8 @@ def get_detections(camera_id):
         return jsonify({
             "workers": state.workers,
             "compliant": state.compliant,
+            "frame_width": state.frame_width,
+            "frame_height": state.frame_height,
             "boxes": state.boxes,
             "stale": (time.time() - state.last_update) > 5 if state.last_update else True,
             "error": state.error,
@@ -253,8 +338,6 @@ def get_detections(camera_id):
 
 @app.route("/api/upload", methods=["POST"])
 def upload_clip():
-    """Lets the frontend's "Run model on my clip" button run real
-    inference on an uploaded video instead of just previewing it."""
     file = request.files.get("video")
     if not file:
         return jsonify({"error": "no file provided"}), 400

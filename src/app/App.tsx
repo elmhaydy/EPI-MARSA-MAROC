@@ -127,7 +127,10 @@ type Page = "dashboard" | "monitoring" | "cameras" | "alerts" | "incidents" | "r
 
 type DetectionBox = {
   x: number; y: number; w: number; h: number;
-  label: string; conf: number; kind: "ok" | "violation" | "no-vest";
+  label: string; conf: number; kind: "ok" | "violation";
+  missing: string[];   // ["Helmet"], ["Vest"], ["Helmet","Vest"] ou []
+  status: "CONFORM" | "NON-CONFORM";
+  text: string;
 };
 
 type DetectionPayload = {
@@ -1122,10 +1125,10 @@ function LiveMonitoringPage() {
   const workerCount = detections?.workers ?? 0;
   const compliantCount = detections?.compliant ?? 0;
   const violationCount = Math.max(0, workerCount - compliantCount);
-  const helmetOk = boxes.filter(b => b.kind !== "violation").length;
-  const vestOk = boxes.filter(b => b.kind !== "no-vest").length;
-  const noHelmetCount = boxes.filter(b => b.kind === "violation").length;
-  const noVestCount = boxes.filter(b => b.kind === "no-vest").length;
+  const noHelmetCount = boxes.filter(b => b.missing?.includes("Helmet")).length;
+  const noVestCount = boxes.filter(b => b.missing?.includes("Vest")).length;
+  const helmetOk = boxes.length - noHelmetCount;
+  const vestOk = boxes.length - noVestCount;
 
   // Reset playback state whenever the selected camera/video changes.
   useEffect(() => {
@@ -1254,7 +1257,7 @@ function LiveMonitoringPage() {
                 key={activeVideoSrc}
                 ref={videoRef}
                 src={activeVideoSrc}
-                className="absolute inset-0 w-full h-full object-cover"
+                className="absolute inset-0 w-full h-full object-contain"
                 autoPlay
                 loop
                 muted
@@ -1285,7 +1288,17 @@ function LiveMonitoringPage() {
               const col = kindColor[d.kind];
               return (
                 <div key={i} className="absolute" style={{ left: `${d.x}%`, top: `${d.y}%`, width: `${d.w}%`, height: `${d.h}%`, border: `2px solid ${col}`, boxShadow: `0 0 12px ${col}50` }}>
-                  <div className="absolute top-0 left-0 text-white px-1 leading-tight" style={{ background: col, fontSize: 9, fontFamily: "monospace", fontWeight: "bold", color: d.kind === "ok" ? "#000" : "#fff" }}>
+                  {/* Label AU-DESSUS de la boîte, largeur libre (whitespace-nowrap) : ne wrap
+                      plus jamais sur plusieurs lignes même quand la boîte personne est étroite
+                      et le texte de statut long ("NON-CONFORM - Helmet & Vest Missing"). */}
+                  <div
+                    className="absolute text-white px-1.5 py-0.5 leading-tight whitespace-nowrap"
+                    style={{
+                      bottom: "100%", left: 0, marginBottom: 2,
+                      background: col, fontSize: 10, fontFamily: "monospace", fontWeight: "bold",
+                      color: d.kind === "ok" ? "#000" : "#fff", zIndex: 10,
+                    }}
+                  >
                     {d.label} {d.conf}%
                   </div>
                   <div className="absolute -top-px -left-px w-3 h-3" style={{ borderTop: `2px solid ${col}`, borderLeft: `2px solid ${col}` }} />
