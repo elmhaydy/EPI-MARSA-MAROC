@@ -12,9 +12,9 @@ import {
 } from "lucide-react";
 import { AuthPage } from "./AuthPage";
 import { UsersPage } from "./UsersPage";
+import { AuditLogsView } from "./AuditLogsView";
+import { NotificationCenter } from "./NotificationCenter";
 import marsaLogo from "../../asset/img/MARSA_LOGO.png";
-
-
 
 // ─── Backend Configuration ─────────────────────────────────────────────────
 //
@@ -127,7 +127,7 @@ const violationTypePie = [
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Page = "dashboard" | "monitoring" | "cameras" | "alerts" | "incidents" | "reports" | "settings" | "localisation" | "users" | "login";
+type Page = "dashboard" | "monitoring" | "cameras" | "alerts" | "incidents" | "reports" | "settings" | "localisation" | "users" | "audit-logs" | "login";
 
 type DetectionBox = {
   x: number; y: number; w: number; h: number;
@@ -152,6 +152,7 @@ const navItems: { id: Page; label: string; icon: React.ElementType; badge?: numb
   { id: "incidents",  label: "Incident History", icon: History },
   { id: "reports",    label: "Reports",          icon: FileText },
   { id: "users",      label: "Utilisateurs",     icon: Users },
+  { id: "audit-logs", label: "Journal d'Audit",  icon: Shield },
   { id: "settings",   label: "Settings",         icon: Settings },
 ];
 
@@ -404,6 +405,7 @@ const pageLabels: Record<Page, string> = {
   incidents:  "Incident History",
   reports:    "Reports & Analytics",
   users:      "Gestion des Utilisateurs",
+  "audit-logs": "Journal d'Audit & Sécurité",
   settings:   "System Settings",
   login:      "Espace Connexion",
 };
@@ -446,7 +448,7 @@ function TopBar({
   }, []);
 
   return (
-    <header className="h-13 flex items-center px-5 border-b border-border bg-card/60 backdrop-blur-sm gap-4 flex-shrink-0" style={{ height: 52 }}>
+    <header className="relative z-50 flex items-center px-5 border-b border-border bg-card/60 backdrop-blur-sm gap-4 flex-shrink-0" style={{ height: 52 }}>
       <div className="flex items-center gap-2">
         <Activity size={14} className="text-primary" />
         <span className="text-sm font-semibold text-foreground">{pageLabels[page]}</span>
@@ -463,10 +465,7 @@ function TopBar({
           YOLOv8s
         </div>
         <div className="h-4 w-px bg-border" />
-        <button className="relative p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">
-          <Bell size={15} />
-          <span className="absolute top-0.5 right-0.5 w-2 h-2 bg-red-500 rounded-full" />
-        </button>
+        <NotificationCenter apiBaseUrl={API_BASE_URL} onNavigate={(p) => setPage(p as Page)} />
         <button
           onClick={() => setDarkMode(!darkMode)}
           className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors"
@@ -527,6 +526,14 @@ function TopBar({
                   )}
 
                   <button
+                    onClick={() => { setPage("audit-logs"); setDropdownOpen(false); }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-foreground hover:bg-primary/10 hover:text-primary transition-colors text-left font-medium"
+                  >
+                    <Shield size={15} className="text-primary" />
+                    <span>Journal d'Audit & Sécurité</span>
+                  </button>
+
+                  <button
                     onClick={() => { setPage("settings"); setDropdownOpen(false); }}
                     className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-foreground hover:bg-primary/10 hover:text-primary transition-colors text-left font-medium"
                   >
@@ -540,9 +547,9 @@ function TopBar({
                   >
                     <div className="flex items-center gap-2.5">
                       {darkMode ? <Sun size={15} className="text-amber-400" /> : <Moon size={15} className="text-indigo-400" />}
-                      <span>{darkMode ? "Mode Clair" : "Mode Sombre"}</span>
+                      <span>Mode d'Affichage</span>
                     </div>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                    <span className="text-[10px] px-2 py-0.5 rounded font-semibold bg-primary/10 text-primary border border-primary/20">
                       {darkMode ? "Sombre" : "Clair"}
                     </span>
                   </button>
@@ -2278,6 +2285,7 @@ export default function App() {
                 </div>
               )
             )}
+            {page === "audit-logs" && <AuditLogsView apiBaseUrl={API_BASE_URL} currentUser={currentUser} />}
             {page === "settings"   && <SettingsPage darkMode={darkMode} setDarkMode={setDarkMode} />}
           </main>
         </div>
