@@ -203,6 +203,11 @@ function useDetections(cameraId: string, enabled: boolean) {
 
   return { data, connected, checking };
 }
+type ReportSummary = { avg_compliance: number; total_violations: number; workers_monitored: number; detection_accuracy: number };
+type TrendPoint = { label: string; compliance: number; violations: number };
+type TerminalStat = { terminal: string; helmet: number; vest: number; both: number };
+type ViolationTypeStat = { name: string; value: number; color: string };
+
 
 function useBackendHealth() {
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
@@ -249,6 +254,55 @@ function MarsaStarLogo({ className = "w-6 h-6" }: { className?: string }) {
       />
     </svg>
   );
+}
+
+
+function useReportsData(reportType: "Daily" | "Weekly" | "Monthly") {
+  const [summary, setSummary] = useState<ReportSummary | null>(null);
+  const [trend, setTrend] = useState<TrendPoint[]>([]);
+  const [byTerminal, setByTerminal] = useState<TerminalStat[]>([]);
+  const [violationTypes, setViolationTypes] = useState<ViolationTypeStat[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const range = reportType === "Daily" ? "daily" : reportType === "Monthly" ? "monthly" : "weekly";
+    setLoading(true);
+    setError(null);
+
+    (async () => {
+      try {
+        const [s, t, bt, vt] = await Promise.all([
+          fetch(`${API_BASE_URL}/api/reports/summary?range=${range}`).then(r => r.json()),
+          fetch(`${API_BASE_URL}/api/reports/trend?range=${range}`).then(r => r.json()),
+          fetch(`${API_BASE_URL}/api/reports/by-terminal?range=${range}`).then(r => r.json()),
+          fetch(`${API_BASE_URL}/api/reports/violation-types?range=${range}`).then(r => r.json()),
+        ]);
+        if (cancelled) return;
+        setSummary(s); setTrend(t); setByTerminal(bt); setViolationTypes(vt);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Impossible de charger les rapports");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [reportType]);
+
+  return { summary, trend, byTerminal, violationTypes, loading, error };
+}
+
+function exportCsv(filename: string, rows: Record<string, string | number>[]) {
+  if (!rows.length) return;
+  const headers = Object.keys(rows[0]);
+  const csv = [headers.join(";"), ...rows.map(r => headers.map(h => r[h]).join(";"))].join("\n");
+  const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ─── Shared Components ────────────────────────────────────────────────────────
@@ -2017,8 +2071,28 @@ function IncidentHistoryPage() {
 
 function ReportsPage() {
   const [reportType, setReportType] = useState<"Daily" | "Weekly" | "Monthly">("Weekly");
-  const chartData = reportType === "Daily" ? complianceTrend : reportType === "Weekly" ? weeklyCompliance : monthlyCompliance;
-  const xKey = reportType === "Daily" ? "time" : reportType === "Weekly" ? "day" : "week";
+  const { summary, trend, byTerminal, violationTypes, loading, error } = useReportsData(reportType);
+  const [sendState, setSendState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [sendMessage, setSendMessage] = useState<string | null>(null);
+
+  const handleSendReport = async () => {
+    setSendState("sending");
+    setSendMessage(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/reports/send-daily`, { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      setSendState("sent");
+      setSendMessage(json.message);
+      setTimeout(() => setSendState("idle"), 4000);
+    } catch (err) {
+      setSendState("error");
+      setSendMessage(err instanceof Error ? err.message : "Échec de l'envoi");
+    }
+  };
+
+  const xKey = "label";
+  const hasData = (summary?.workers_monitored ?? 0) > 0;
 
   return (
     <div className="space-y-5">
@@ -2031,26 +2105,55 @@ function ReportsPage() {
           ))}
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <button className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border border-border text-foreground hover:bg-white/5 transition-colors"><Download size={13} />PDF</button>
-          <button className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border border-border text-foreground hover:bg-white/5 transition-colors"><Download size={13} />Excel</button>
-        </div>
+        <button
+          onClick={() => exportCsv(`rapport_${reportType.toLowerCase()}.csv`, trend as any)}
+          disabled={!trend.length}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border border-border text-foreground hover:bg-white/5 transition-colors disabled:opacity-40"
+        >
+          <Download size={13} />CSV
+        </button>
+        <button
+          onClick={handleSendReport}
+          disabled={sendState === "sending"}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          style={{ background: sendState === "error" ? "#ef4444" : sendState === "sent" ? "#22c55e" : "#f97316" }}
+        >
+          {sendState === "sending" && <span className="w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />}
+          {sendState === "sent" && <CheckCircle size={13} />}
+          {sendState === "error" && <AlertTriangle size={13} />}
+          {sendState === "idle" && <FileText size={13} />}
+          {sendState === "sending" ? "Envoi en cours…" : sendState === "sent" ? "Rapport envoyé" : sendState === "error" ? "Échec" : "Envoyer le rapport PDF"}
+        </button>
+      </div>
       </div>
 
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/5 text-red-400 text-xs px-3 py-2">
+          Impossible de joindre {API_BASE_URL} ({error}). Vérifiez que le backend Flask tourne.
+        </div>
+      )}
+
+      {!loading && !error && !hasData && (
+        <div className="rounded-lg border border-orange-500/20 bg-orange-500/5 text-orange-400 text-xs px-3 py-2">
+          Aucune détection enregistrée pour cette période — les données apparaîtront ici dès que le modèle détectera des travailleurs sur une caméra.
+        </div>
+      )}
+
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KPICard label="Avg Compliance" value="86.4%"  sub={`This ${reportType.toLowerCase()}`} icon={Shield}        trend="+1.2%" color="green" />
-        <KPICard label="Total Violations" value={reportType === "Daily" ? "37" : reportType === "Weekly" ? "147" : "588"} sub="PPE violations" icon={AlertTriangle} trend="-8" color="red" />
-        <KPICard label="Workers Monitored" value={reportType === "Daily" ? "98" : reportType === "Weekly" ? "341" : "1,240"} sub="Unique events" icon={User} color="blue" />
-        <KPICard label="Detection Accuracy" value="94.8%" sub="Model conf. avg." icon={Cpu} color="orange" />
+        <KPICard label="Avg Compliance"     value={loading ? "…" : `${summary?.avg_compliance ?? 0}%`}      sub={`This ${reportType.toLowerCase()}`} icon={Shield}        color="green" />
+        <KPICard label="Total Violations"   value={loading ? "…" : summary?.total_violations ?? 0}          sub="PPE violations"                     icon={AlertTriangle} color="red" />
+        <KPICard label="Workers Monitored"  value={loading ? "…" : summary?.workers_monitored ?? 0}         sub="Detection events"                   icon={User}          color="blue" />
+        <KPICard label="Detection Accuracy" value={loading ? "…" : `${summary?.detection_accuracy ?? 0}%`}  sub="Model conf. avg."                   icon={Cpu}           color="orange" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div className="rounded-xl border border-border bg-card p-5">
           <SectionTitle title={`${reportType} Compliance Trend`} />
           <ResponsiveContainer width="100%" height={210}>
-            <LineChart data={chartData}>
+            <LineChart data={trend}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
               <XAxis dataKey={xKey} tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis domain={[70, 100]} tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis domain={[0, 100]} tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
               <Tooltip contentStyle={tooltipStyle} />
               <Line type="monotone" dataKey="compliance" stroke="#22c55e" strokeWidth={2.5} dot={{ fill: "#22c55e", r: 3 }} name="Compliance %" />
             </LineChart>
@@ -2060,7 +2163,7 @@ function ReportsPage() {
         <div className="rounded-xl border border-border bg-card p-5">
           <SectionTitle title="Violations by Terminal" />
           <ResponsiveContainer width="100%" height={210}>
-            <BarChart data={violationsByTerminal} barSize={16} barGap={3}>
+            <BarChart data={byTerminal} barSize={16} barGap={3}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
               <XAxis dataKey="terminal" tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -2076,7 +2179,7 @@ function ReportsPage() {
         <div className="rounded-xl border border-border bg-card p-5">
           <SectionTitle title={`${reportType} Violations`} />
           <ResponsiveContainer width="100%" height={210}>
-            <BarChart data={chartData}>
+            <BarChart data={trend}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
               <XAxis dataKey={xKey} tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -2091,27 +2194,30 @@ function ReportsPage() {
           <div className="flex items-center gap-4">
             <ResponsiveContainer width="45%" height={180}>
               <PieChart>
-                <Pie data={violationTypePie.slice(0, 3)} cx="50%" cy="50%" innerRadius={42} outerRadius={72} paddingAngle={4} dataKey="value">
-                  {violationTypePie.slice(0, 3).map((e, i) => <Cell key={i} fill={e.color} />)}
+                <Pie data={violationTypes} cx="50%" cy="50%" innerRadius={42} outerRadius={72} paddingAngle={4} dataKey="value">
+                  {violationTypes.map((e, i) => <Cell key={i} fill={e.color} />)}
                 </Pie>
                 <Tooltip contentStyle={tooltipStyle} />
               </PieChart>
             </ResponsiveContainer>
             <div className="flex-1 space-y-3">
-              {violationTypePie.slice(0, 3).map(item => (
-                <div key={item.name}>
-                  <div className="flex justify-between text-xs mb-1.5">
-                    <span className="flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 rounded-sm" style={{ background: item.color }} />
-                      <span className="text-muted-foreground">{item.name}</span>
-                    </span>
-                    <span className="font-mono text-foreground">{item.value}</span>
+              {violationTypes.map(item => {
+                const max = Math.max(1, ...violationTypes.map(v => v.value));
+                return (
+                  <div key={item.name}>
+                    <div className="flex justify-between text-xs mb-1.5">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-sm" style={{ background: item.color }} />
+                        <span className="text-muted-foreground">{item.name}</span>
+                      </span>
+                      <span className="font-mono text-foreground">{item.value}</span>
+                    </div>
+                    <div className="h-1 rounded-full bg-white/5">
+                      <div className="h-full rounded-full" style={{ width: `${(item.value / max) * 100}%`, background: item.color }} />
+                    </div>
                   </div>
-                  <div className="h-1 rounded-full bg-white/5">
-                    <div className="h-full rounded-full" style={{ width: `${(item.value / 78) * 100}%`, background: item.color }} />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>

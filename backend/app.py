@@ -11,7 +11,7 @@ frontend React :
     YOLOv8 COCO (Person Detection)
       │
       ▼
-    ROI de chaque personne (padding proportionnel, comme test_video.py)
+    ROI de chaque personne (padding proportionnel)
       │
       ▼
     best_v3.pt -> Helmet / NoHelmet / Vest / NoVest
@@ -44,13 +44,34 @@ import cv2
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from ultralytics import YOLO
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Table,
+    TableStyle,
+    Paragraph,
+    Spacer,
+    Image as RLImage,
+)
+
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import cm
+from reportlab.lib.pagesizes import A4
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+REPORTS_DIR = os.path.join(BASE_DIR, "reports")
+CHARTS_DIR = os.path.join(BASE_DIR, "charts")
+
+os.makedirs(REPORTS_DIR, exist_ok=True)
+os.makedirs(CHARTS_DIR, exist_ok=True)
 
 # ─── Configuration (mêmes valeurs que test_video.py) ─────────────────────────
 
 CAMERA_SOURCES = {
     "CAM-001": "videos/CAM-001.mp4",
     "CAM-005": "videos/CAM-005.mp4",
-    # Ajoutez vos autres caméras ici.
+
 }
 
 MODELS_DIR = "models"
@@ -261,6 +282,8 @@ def run_inference(frame):
     return people
 
 
+
+
 def camera_worker(camera_id: str, source: str):
     is_file = not source.startswith("rtsp://")
     cap = cv2.VideoCapture(source)
@@ -295,7 +318,7 @@ def camera_worker(camera_id: str, source: str):
             with camera_lock:
                 camera_states[camera_id].error = str(exc)
             continue
-
+        log_detections_to_db(camera_id, people)
         compliant = sum(1 for p in people if p["status"] == "CONFORM")
         frame_h, frame_w = frame.shape[:2]
 
@@ -322,7 +345,6 @@ def start_camera(camera_id: str, source: str):
 
 for cam_id, src in CAMERA_SOURCES.items():
     start_camera(cam_id, src)
-
 
 # ─── Database & Auth Configuration ───────────────────────────────────────────
 
@@ -690,6 +712,266 @@ def seed_default_notifications():
         )
         db.session.add(notif)
     db.session.commit()
+
+# ----------------------------
+# Camera Model
+# ----------------------------
+class Camera(db.Model):
+    __tablename__ = "camera"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    code = db.Column(db.String(50), unique=True, index=True)
+
+    name = db.Column(db.String(120), nullable=False)
+
+    terminal = db.Column(db.String(120), nullable=False)
+
+    zone = db.Column(db.String(120), nullable=False)
+
+    location = db.Column(db.String(255))
+
+    ip_address = db.Column(db.String(100))
+
+    port = db.Column(db.Integer)
+
+    protocol = db.Column(db.String(20), default="RTSP")
+
+    username = db.Column(db.String(100))
+
+    password = db.Column(db.String(255))
+
+    model = db.Column(db.String(100))
+
+    resolution = db.Column(db.String(30))
+
+    fps = db.Column(db.Integer)
+
+    orientation = db.Column(db.String(100))
+
+
+    pos_x = db.Column(db.Float)
+
+    pos_y = db.Column(db.Float)
+
+    status = db.Column(db.String(20), default="online")
+
+    created_at = db.Column(
+        db.String(50),
+        default=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "terminal": self.terminal,
+            "zone": self.zone,
+            "location": self.location,
+            "ip_address": self.ip_address,
+            "port": self.port,
+            "protocol": self.protocol,
+            "model": self.model,
+            "resolution": self.resolution,
+            "fps": self.fps,
+            "orientation": self.orientation,
+            "pos_x": self.pos_x,
+            "pos_y": self.pos_y,
+            "status": self.status
+        }
+
+# ----------------------------
+# Detection Model
+# ----------------------------
+
+class Detection(db.Model):
+    __tablename__ = "detections"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    camera_id = db.Column(
+        db.Integer,
+        db.ForeignKey("camera.id"),
+        nullable=False
+    )
+
+    detection_time = db.Column(
+        db.String(50),
+        default=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+    worker_id = db.Column(db.String(50))
+
+    helmet = db.Column(db.Boolean)
+
+    vest = db.Column(db.Boolean)
+
+    confidence = db.Column(db.Float)
+
+    snapshot = db.Column(db.String(255))
+
+    camera = db.relationship("Camera", backref="detections")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "camera_id": self.camera_id,
+            "detection_time": self.detection_time,
+            "worker_id": self.worker_id,
+            "helmet": self.helmet,
+            "vest": self.vest,
+            "confidence": self.confidence,
+            "snapshot": self.snapshot
+        }
+
+# ----------------------------
+# Alert Model
+# ----------------------------
+
+class Alert(db.Model):
+    __tablename__ = "alerts"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    detection_id = db.Column(
+        db.Integer,
+        db.ForeignKey("detections.id"),
+        nullable=False
+    )
+
+    camera_id = db.Column(
+        db.Integer,
+        db.ForeignKey("camera.id"),
+        nullable=False
+    )
+
+    alert_type = db.Column(db.String(100))
+
+    description = db.Column(db.Text)
+
+    severity = db.Column(db.String(30), default="critical")
+
+    status = db.Column(db.String(30), default="New")
+
+    created_at = db.Column(
+        db.String(50),
+        default=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+    detection = db.relationship("Detection")
+
+    camera = db.relationship("Camera")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "detection_id": self.detection_id,
+            "camera_id": self.camera_id,
+            "alert_type": self.alert_type,
+            "description": self.description,
+            "severity": self.severity,
+            "status": self.status,
+            "created_at": self.created_at
+        }
+
+DB_LOG_INTERVAL_SEC = 5     # write to DB at most once per camera every 5s
+ALERT_COOLDOWN_SEC = 60     # don't spam duplicate alerts for the same camera+type
+
+_last_db_write: dict[str, float] = {}
+_last_alert: dict[str, float] = {}
+_db_write_lock = threading.Lock()
+
+# Mirrors the `cameras` array in your frontend so terminal/zone grouping
+# in Reports lines up with what's shown in Camera Management.
+CAMERA_METADATA = {
+    "CAM-001": {"name": "TC1-Quay-North",    "terminal": "Terminal 1", "zone": "Quay Zone"},
+    "CAM-002": {"name": "TC1-Quay-South",    "terminal": "Terminal 1", "zone": "Quay Zone"},
+    "CAM-003": {"name": "TC1-Storage-A",     "terminal": "Terminal 1", "zone": "Storage Zone"},
+    "CAM-004": {"name": "TC1-Storage-B",     "terminal": "Terminal 1", "zone": "Storage Zone"},
+    "CAM-005": {"name": "TC1-Gate-Entry",    "terminal": "Terminal 1", "zone": "Gate Area"},
+    "CAM-006": {"name": "TC2-Quay-East",     "terminal": "Terminal 2", "zone": "Quay Zone"},
+    "CAM-007": {"name": "TC2-Quay-West",     "terminal": "Terminal 2", "zone": "Quay Zone"},
+    "CAM-008": {"name": "TC2-Container-Yrd", "terminal": "Terminal 2", "zone": "Container Yard"},
+    "CAM-009": {"name": "TC2-Workshop",      "terminal": "Terminal 2", "zone": "Workshop"},
+    "CAM-010": {"name": "TC2-Storage-Main",  "terminal": "Terminal 2", "zone": "Storage Zone"},
+    "CAM-011": {"name": "TC3-Gate-Main",     "terminal": "Terminal 3", "zone": "Gate Area"},
+    "CAM-012": {"name": "TC3-Quay-A",        "terminal": "Terminal 3", "zone": "Quay Zone"},
+    "CAM-013": {"name": "TC3-Quay-B",        "terminal": "Terminal 3", "zone": "Quay Zone"},
+    "CAM-014": {"name": "TC3-Container-A",   "terminal": "Terminal 3", "zone": "Container Yard"},
+    "CAM-015": {"name": "TC3-Container-B",   "terminal": "Terminal 3", "zone": "Container Yard"},
+    "CAM-016": {"name": "TC3-Workshop-Main", "terminal": "Terminal 3", "zone": "Workshop"},
+}
+
+
+def get_or_create_camera(code: str) -> "Camera":
+    cam = Camera.query.filter_by(code=code).first()
+    if cam:
+        return cam
+    meta = CAMERA_METADATA.get(code, {})
+    cam = Camera(
+        code=code,
+        name=meta.get("name", code),
+        terminal=meta.get("terminal", "Non assigné"),
+        zone=meta.get("zone", "Zone inconnue"),
+        status="online",
+    )
+    db.session.add(cam)
+    db.session.commit()
+    return cam
+
+
+def log_detections_to_db(camera_code: str, people: list):
+    """Throttled persistence: at most once every DB_LOG_INTERVAL_SEC per
+    camera, saves one Detection row per person seen and raises Alert +
+    Notification rows for violations (with cooldown so alerts don't spam)."""
+    now = time.time()
+    with _db_write_lock:
+        if now - _last_db_write.get(camera_code, 0) < DB_LOG_INTERVAL_SEC:
+            return
+        _last_db_write[camera_code] = now
+
+    try:
+        with app.app_context():
+            cam = get_or_create_camera(camera_code)
+            ts_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            for idx, p in enumerate(people):
+                det = Detection(
+                    camera_id=cam.id,
+                    detection_time=ts_str,
+                    worker_id=f"{camera_code}-W{idx + 1}",
+                    helmet="Helmet" not in p["missing"],
+                    vest="Vest" not in p["missing"],
+                    confidence=p["confidence"],
+                )
+                db.session.add(det)
+                db.session.flush()  # populate det.id before using it as a FK
+
+                if p["status"] == "NON-CONFORM":
+                    cooldown_key = f"{camera_code}:{p['text']}"
+                    if now - _last_alert.get(cooldown_key, 0) >= ALERT_COOLDOWN_SEC:
+                        _last_alert[cooldown_key] = now
+                        severity = "critical" if len(p["missing"]) == 2 else "warning"
+                        db.session.add(Alert(
+                            detection_id=det.id,
+                            camera_id=cam.id,
+                            alert_type=p["text"],
+                            description=f"Violation détectée sur {camera_code} : {p['text']}",
+                            severity=severity,
+                            status="New",
+                        ))
+                        create_notification(
+                            title=f"Violation EPI ({camera_code})",
+                            message=f"{p['text']} — confiance {p['confidence'] * 100:.1f}%",
+                            type="violation",
+                            severity=severity,
+                            camera_id=camera_code,
+                        )
+
+            db.session.commit()
+    except Exception as exc:
+        print(f"log_detections_to_db error: {exc}", flush=True)
+        db.session.rollback()
 
 
 with app.app_context():
@@ -1341,6 +1623,403 @@ def health():
         "cameras": list(camera_states.keys()) if "camera_states" in globals() else []
     })
 
+#-------------Report Routes------------------
+def _range_bounds(range_key: str):
+    now = datetime.datetime.now()
+    if range_key == "daily":
+        return now - datetime.timedelta(hours=24), "hour"
+    if range_key == "monthly":
+        return now - datetime.timedelta(weeks=4), "week"
+    return now - datetime.timedelta(days=7), "day"  # weekly default
+
+
+@app.route("/api/reports/summary")
+def reports_summary():
+    try:
+        start, _ = _range_bounds(request.args.get("range", "weekly"))
+        dets = Detection.query.filter(Detection.detection_time >= start.strftime("%Y-%m-%d %H:%M:%S")).all()
+        total = len(dets)
+        compliant = sum(1 for d in dets if d.helmet and d.vest)
+        avg_conf = (sum(d.confidence or 0 for d in dets) / total) if total else 0
+        return jsonify({
+            "avg_compliance": round(compliant / total * 100, 1) if total else 0,
+            "total_violations": total - compliant,
+            "workers_monitored": total,
+            "detection_accuracy": round(avg_conf * 100, 1),
+        })
+    except Exception as err:
+        return jsonify({"error": str(err)}), 500
+
+
+@app.route("/api/reports/trend")
+def reports_trend():
+    try:
+        start, bucket = _range_bounds(request.args.get("range", "weekly"))
+        dets = Detection.query.filter(Detection.detection_time >= start.strftime("%Y-%m-%d %H:%M:%S")) \
+            .order_by(Detection.detection_time.asc()).all()
+
+        buckets: dict[str, dict] = {}
+        for d in dets:
+            dt = datetime.datetime.strptime(d.detection_time, "%Y-%m-%d %H:%M:%S")
+            key = dt.strftime("%Hh") if bucket == "hour" else (f"S{dt.isocalendar()[1]}" if bucket == "week" else dt.strftime("%a"))
+            b = buckets.setdefault(key, {"total": 0, "compliant": 0})
+            b["total"] += 1
+            b["compliant"] += int(d.helmet and d.vest)
+
+        return jsonify([
+            {"label": k, "compliance": round(v["compliant"] / v["total"] * 100, 1) if v["total"] else 0,
+             "violations": v["total"] - v["compliant"]}
+            for k, v in buckets.items()
+        ])
+    except Exception as err:
+        return jsonify({"error": str(err)}), 500
+
+
+@app.route("/api/reports/by-terminal")
+def reports_by_terminal():
+    try:
+        start, _ = _range_bounds(request.args.get("range", "weekly"))
+        rows = db.session.query(Camera.terminal, Detection.helmet, Detection.vest) \
+            .join(Detection, Detection.camera_id == Camera.id) \
+            .filter(Detection.detection_time >= start.strftime("%Y-%m-%d %H:%M:%S")).all()
+
+        stats: dict[str, dict] = {}
+        for terminal, helmet, vest in rows:
+            s = stats.setdefault(terminal, {"helmet": 0, "vest": 0, "both": 0})
+            if not helmet and not vest: s["both"] += 1
+            elif not helmet: s["helmet"] += 1
+            elif not vest: s["vest"] += 1
+
+        return jsonify([{"terminal": t, **v} for t, v in stats.items()])
+    except Exception as err:
+        return jsonify({"error": str(err)}), 500
+
+
+@app.route("/api/reports/violation-types")
+def reports_violation_types():
+    try:
+        start, _ = _range_bounds(request.args.get("range", "weekly"))
+        dets = db.session.query(Detection.helmet, Detection.vest) \
+            .filter(Detection.detection_time >= start.strftime("%Y-%m-%d %H:%M:%S")).all()
+
+        return jsonify([
+            {"name": "No Helmet",    "value": sum(1 for h, v in dets if not h and v), "color": "#ef4444"},
+            {"name": "No Vest",      "value": sum(1 for h, v in dets if h and not v), "color": "#f97316"},
+            {"name": "Both Missing", "value": sum(1 for h, v in dets if not h and not v), "color": "#a855f7"},
+            {"name": "Compliant",    "value": sum(1 for h, v in dets if h and v), "color": "#22c55e"},
+        ])
+    except Exception as err:
+        return jsonify({"error": str(err)}), 500
+import matplotlib
+matplotlib.use("Agg")  # backend sans interface graphique, obligatoire côté serveur
+import matplotlib.pyplot as plt
+
+CHARTS_DIR = "reports/charts"
+os.makedirs(CHARTS_DIR, exist_ok=True)
+
+ORANGE = "#f97316"
+RED = "#ef4444"
+PURPLE = "#a855f7"
+GREEN = "#22c55e"
+
+
+def generate_terminal_bar_chart(by_terminal: dict, out_path: str):
+    """Bar chart : violations (casque/gilet/les deux) par terminal."""
+    terminals = list(by_terminal.keys()) or ["Aucune donnée"]
+    helmet = [by_terminal.get(t, {}).get("helmet", 0) for t in terminals]
+    vest = [by_terminal.get(t, {}).get("vest", 0) for t in terminals]
+    both = [by_terminal.get(t, {}).get("both", 0) for t in terminals]
+
+    x = range(len(terminals))
+    width = 0.25
+
+    fig, ax = plt.subplots(figsize=(6.5, 3.2), dpi=150)
+    ax.bar([i - width for i in x], helmet, width, label="Sans Casque", color=RED)
+    ax.bar(x, vest, width, label="Sans Gilet", color=ORANGE)
+    ax.bar([i + width for i in x], both, width, label="Les Deux", color=PURPLE)
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(terminals, fontsize=9)
+    ax.set_ylabel("Nombre de violations", fontsize=9)
+    ax.legend(fontsize=8, frameon=False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, transparent=False, facecolor="white")
+    plt.close(fig)
+
+
+def generate_violation_pie_chart(pie_data: list, out_path: str):
+    """Pie chart : répartition Conforme / Sans Casque / Sans Gilet / Les Deux."""
+    labels = [d["name"] for d in pie_data if d["value"] > 0]
+    values = [d["value"] for d in pie_data if d["value"] > 0]
+    colors_list = [d["color"] for d in pie_data if d["value"] > 0]
+
+    if not values:
+        labels, values, colors_list = ["Aucune donnée"], [1], ["#94a3b8"]
+
+    fig, ax = plt.subplots(figsize=(4.5, 3.5), dpi=150)
+    ax.pie(
+        values, labels=labels, colors=colors_list, autopct="%1.0f%%",
+        startangle=90, textprops={"fontsize": 8},
+        wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+    )
+    ax.axis("equal")
+    fig.tight_layout()
+    fig.savefig(out_path, transparent=False, facecolor="white")
+    plt.close(fig)
+
+
+def generate_compliance_trend_chart(trend_data: list, out_path: str):
+    """Line chart : tendance de conformité sur la période."""
+    labels = [d["label"] for d in trend_data] or ["-"]
+    values = [d["compliance"] for d in trend_data] or [0]
+
+    fig, ax = plt.subplots(figsize=(6.5, 3.0), dpi=150)
+    ax.plot(labels, values, color=GREEN, linewidth=2.5, marker="o", markersize=4)
+    ax.fill_between(range(len(labels)), values, color=GREEN, alpha=0.1)
+    ax.set_ylabel("Conformité (%)", fontsize=9)
+    ax.set_ylim(0, 100)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=8, axis="x", rotation=30)
+    ax.tick_params(labelsize=8, axis="y")
+    fig.tight_layout()
+    fig.savefig(out_path, transparent=False, facecolor="white")
+    plt.close(fig)
+from reportlab.platypus import Image as RLImage
+
+
+def generate_daily_report_pdf() -> str:
+    now = datetime.datetime.now()
+    start = now - datetime.timedelta(hours=24)
+    start_str = start.strftime("%Y-%m-%d %H:%M:%S")
+
+    with app.app_context():
+        dets = Detection.query.filter(Detection.detection_time >= start_str).all()
+        alerts = Alert.query.filter(Alert.created_at >= start_str).all()
+
+        total = len(dets)
+        compliant = sum(1 for d in dets if d.helmet and d.vest)
+        violations = total - compliant
+        compliance_pct = round(compliant / total * 100, 1) if total else 0
+
+        # ── Répartition par terminal ──
+        by_terminal = {}
+        rows = db.session.query(Camera.terminal, Detection.helmet, Detection.vest) \
+            .join(Detection, Detection.camera_id == Camera.id) \
+            .filter(Detection.detection_time >= start_str).all()
+        for terminal, helmet, vest in rows:
+            t = by_terminal.setdefault(terminal, {"helmet": 0, "vest": 0, "both": 0, "total": 0})
+            t["total"] += 1
+            if not helmet and not vest: t["both"] += 1
+            elif not helmet: t["helmet"] += 1
+            elif not vest: t["vest"] += 1
+
+        # ── Répartition par type de violation (pour le pie chart) ──
+        pie_data = [
+            {"name": "Conforme",     "value": compliant, "color": GREEN},
+            {"name": "Sans Casque",  "value": sum(1 for d in dets if not d.helmet and d.vest), "color": RED},
+            {"name": "Sans Gilet",   "value": sum(1 for d in dets if d.helmet and not d.vest), "color": ORANGE},
+            {"name": "Les Deux",     "value": sum(1 for d in dets if not d.helmet and not d.vest), "color": PURPLE},
+        ]
+
+        # ── Tendance horaire (pour le line chart) ──
+        buckets: dict[str, dict] = {}
+        for d in dets:
+            dt = datetime.datetime.strptime(d.detection_time, "%Y-%m-%d %H:%M:%S")
+            key = dt.strftime("%Hh")
+            b = buckets.setdefault(key, {"total": 0, "compliant": 0})
+            b["total"] += 1
+            b["compliant"] += int(d.helmet and d.vest)
+        trend_data = [
+            {"label": k, "compliance": round(v["compliant"] / v["total"] * 100, 1) if v["total"] else 0}
+            for k, v in sorted(buckets.items())
+        ]
+
+    # ── Génération des graphiques en PNG ──
+    ts = now.strftime("%Y%m%d_%H%M%S")
+    bar_path = os.path.join(CHARTS_DIR, f"bar_{ts}.png")
+    pie_path = os.path.join(CHARTS_DIR, f"pie_{ts}.png")
+    trend_path = os.path.join(CHARTS_DIR, f"trend_{ts}.png")
+
+    generate_terminal_bar_chart(by_terminal, bar_path)
+    generate_violation_pie_chart(pie_data, pie_path)
+    generate_compliance_trend_chart(trend_data, trend_path)
+
+    # ── Construction du PDF ──
+    filename = f"rapport_journalier_{now.strftime('%Y%m%d')}.pdf"
+    path = os.path.join(REPORTS_DIR, filename)
+
+    doc = SimpleDocTemplate(path, pagesize=A4, topMargin=1.8*cm, bottomMargin=1.8*cm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TitleOrange", parent=styles["Title"], textColor=colors.HexColor("#f97316"), fontSize=20)
+    elements = []
+
+    elements.append(Paragraph("Marsa Maroc — Rapport Journalier EPI", title_style))
+    elements.append(Paragraph(f"Période : {start.strftime('%d/%m/%Y %H:%M')} — {now.strftime('%d/%m/%Y %H:%M')}", styles["Normal"]))
+    elements.append(Spacer(1, 0.5*cm))
+
+    # ── Tableau résumé ──
+    summary_data = [
+        ["Indicateur", "Valeur"],
+        ["Conformité moyenne", f"{compliance_pct}%"],
+        ["Travailleurs détectés", str(total)],
+        ["Violations", str(violations)],
+        ["Alertes générées", str(len(alerts))],
+    ]
+    summary_table = Table(summary_data, colWidths=[9*cm, 6*cm])
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(summary_table)
+    elements.append(Spacer(1, 0.7*cm))
+
+    # ── Graphique : tendance de conformité ──
+    elements.append(Paragraph("Tendance de Conformité", styles["Heading2"]))
+    elements.append(RLImage(trend_path, width=16*cm, height=7.4*cm))
+    elements.append(Spacer(1, 0.6*cm))
+
+    # ── Graphique : violations par terminal ──
+    elements.append(Paragraph("Violations par Terminal", styles["Heading2"]))
+    elements.append(RLImage(bar_path, width=16*cm, height=7.9*cm))
+    elements.append(Spacer(1, 0.6*cm))
+
+    # ── Graphique : répartition des violations ──
+    elements.append(Paragraph("Répartition des Violations", styles["Heading2"]))
+    elements.append(RLImage(pie_path, width=11*cm, height=8.6*cm))
+    elements.append(Spacer(1, 0.6*cm))
+
+    # ── Tableau : alertes critiques récentes ──
+    elements.append(Paragraph("Alertes Critiques Récentes", styles["Heading2"]))
+    critical = [a for a in alerts if a.severity == "critical"][:15]
+    alert_data = [["Caméra", "Type", "Heure"]]
+    for a in critical:
+        alert_data.append([str(a.camera_id), a.alert_type or "-", a.created_at[-8:] if a.created_at else "-"])
+    if len(alert_data) == 1:
+        alert_data.append(["Aucune alerte critique", "-", "-"])
+
+    alert_table = Table(alert_data, colWidths=[5*cm, 8*cm, 4*cm])
+    alert_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#ef4444")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+    ]))
+    elements.append(alert_table)
+
+    doc.build(elements)
+
+    # Nettoyage : les PNG temporaires ne sont plus utiles une fois le PDF construit
+    for p in (bar_path, pie_path, trend_path):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+    return path
+
+import os
+import smtplib
+
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+
+
+def send_report_email(recipient_email, recipient_name, pdf_path):
+    try:
+        msg = MIMEMultipart()
+
+        msg["Subject"] = "Daily PPE Compliance Report - Marsa Maroc"
+        msg["From"] = SMTP_FROM
+        msg["To"] = recipient_email
+
+        body = f"""
+Hello {recipient_name},
+
+Please find attached today's PPE compliance report generated by the AI monitoring system.
+
+Regards,
+
+Marsa Maroc
+HSE Monitoring System
+"""
+
+        msg.attach(MIMEText(body, "plain"))
+
+        with open(pdf_path, "rb") as f:
+            attachment = MIMEBase("application", "octet-stream")
+            attachment.set_payload(f.read())
+
+        encoders.encode_base64(attachment)
+
+        attachment.add_header(
+            "Content-Disposition",
+            f'attachment; filename="{os.path.basename(pdf_path)}"'
+        )
+
+        msg.attach(attachment)
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(SMTP_FROM, recipient_email, msg.as_string())
+        server.quit()
+
+        print(f"Report sent to {recipient_email}")
+
+        return True
+
+    except Exception as e:
+        print("send_report_email:", e)
+
+        return False
+
+@app.route("/api/reports/send-daily", methods=["POST"])
+def trigger_daily_report():
+    try:
+        with app.app_context():
+            pdf_path = generate_daily_report_pdf()
+            admins = User.query.filter(User.role.ilike("%admin%"), User.is_active == True).all()
+
+            if not admins:
+                return jsonify({"error": "Aucun administrateur HSE actif trouvé pour recevoir le rapport."}), 400
+
+            sent_to = []
+            failed = []
+            for admin in admins:
+                ok = send_report_email(admin.email, admin.name, pdf_path)
+                (sent_to if ok else failed).append(admin.email)
+
+            log_audit_event(
+                action="ENVOI_RAPPORT_JOURNALIER_MANUEL",
+                category="Opérations HSE",
+                details=f"Rapport PDF envoyé manuellement à {len(sent_to)} administrateur(s)" + (f" ({len(failed)} échec(s))" if failed else ""),
+                user_name="Système",
+                user_role="Système",
+                severity="info" if not failed else "warning"
+            )
+
+        return jsonify({
+            "message": f"Rapport envoyé à {len(sent_to)} administrateur(s)",
+            "sent_to": sent_to,
+            "failed": failed,
+        })
+    except Exception as err:
+        print("trigger_daily_report error:", err, flush=True)
+        return jsonify({"error": str(err)}), 500
+    
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, threaded=True)
