@@ -1,3 +1,4 @@
+import { LocalisationView } from "./LocalisationView";
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -17,27 +18,9 @@ import marsaLogo from "../../asset/img/MARSA_LOGO.png";
 
 
 // ─── Backend Configuration ─────────────────────────────────────────────────
-//
-// Point this at your Flask server. The Live Monitoring page polls
-//   GET  {API_BASE_URL}/api/detections/{cameraId}
-// and expects JSON shaped like:
-//   {
-//     "workers": 5,
-//     "compliant": 4,
-//     "boxes": [
-//       { "x": 12.4, "y": 20.1, "w": 11.2, "h": 30.5, "label": "No Helmet", "conf": 94.2, "kind": "violation" }
-//     ]
-//   }
-// x/y/w/h are percentages (0-100) relative to the video frame so boxes stay
-// aligned regardless of the rendered video size. "kind" is one of
-// "ok" | "violation" | "no-vest".
-//
-// When you later swap in a real RTSP camera, nothing here changes — only
-// what the Flask endpoint does behind the scenes (OpenCV VideoCapture on a
-// file today, on an rtsp:// URL later).
 const API_BASE_URL = "http://localhost:5000";
 const DETECTION_POLL_MS = 1000;
-
+const DASHBOARD_POLL_MS = 8000;
 
 // ─── Static Data ─────────────────────────────────────────────────────────────
 
@@ -143,6 +126,33 @@ type DetectionPayload = {
   boxes: DetectionBox[];
 };
 
+type DashboardOverview = {
+  totalWorkers: number;
+  compliancePct: number;
+  activeAlerts: number;
+  camerasOnline: number;
+  camerasTotal: number;
+};
+
+type TrendPoint = { time: string; compliance: number; violations: number };
+
+type DashboardAlert = {
+  id: string;
+  worker: string;
+  type: string;
+  confidence: number;
+  camera: string;
+  terminal: string;
+  zone: string;
+  time: string;
+  date: string;
+  status: string;
+};
+
+type TerminalViolations = { terminal: string; helmet: number; vest: number; both: number };
+
+type DistributionSlice = { name: string; value: number; color: string };
+
 const navItems: { id: Page; label: string; icon: React.ElementType; badge?: number }[] = [
   { id: "dashboard",  label: "Dashboard",        icon: LayoutDashboard },
   { id: "monitoring", label: "Live Monitoring",  icon: Monitor },
@@ -166,9 +176,6 @@ function useDateTime() {
   return dt;
 }
 
-// Polls the Flask backend for the latest detections on a given camera.
-// Falls back to a static demo overlay if the backend isn't reachable yet,
-// so the frontend keeps working while the API is being built.
 function useDetections(cameraId: string, enabled: boolean) {
   const [data, setData] = useState<DetectionPayload | null>(null);
   const [connected, setConnected] = useState(false);
@@ -201,6 +208,35 @@ function useDetections(cameraId: string, enabled: boolean) {
   }, [cameraId, enabled]);
 
   return { data, connected, checking };
+}
+
+function useDashboardEndpoint<T>(path: string, fallback: T, intervalMs = DASHBOARD_POLL_MS) {
+  const [data, setData] = useState<T>(fallback);
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}${path}`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as T;
+        if (!cancelled) {
+          setData(json);
+          setConnected(true);
+        }
+      } catch {
+        if (!cancelled) setConnected(false);
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, intervalMs);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [path, intervalMs]);
+
+  return { data, connected };
 }
 
 // ─── Shared Components ────────────────────────────────────────────────────────
@@ -434,7 +470,6 @@ function TopBar({
     return name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
   };
 
-  // Close dropdown on click outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
@@ -478,7 +513,6 @@ function TopBar({
 
         {currentUser ? (
           <div className="relative" ref={menuRef}>
-            {/* User Profile Button Trigger */}
             <button
               onClick={() => setDropdownOpen(!dropdownOpen)}
               className="flex items-center gap-2.5 px-2.5 py-1 rounded-xl hover:bg-muted/50 transition-all border border-transparent hover:border-border/60"
@@ -496,10 +530,8 @@ function TopBar({
               <ChevronDown size={14} className={`text-muted-foreground transition-transform duration-200 ${dropdownOpen ? "rotate-180 text-primary" : ""}`} />
             </button>
 
-            {/* Dropdown Menu Popup */}
             {dropdownOpen && (
               <div className="absolute right-0 mt-2 w-72 rounded-2xl bg-card border border-border/80 shadow-2xl p-3.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150 backdrop-blur-xl">
-                {/* User Header Info Card */}
                 <div className="flex items-center gap-3 p-2.5 rounded-xl bg-muted/40 border border-border/40 mb-3">
                   <div className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold text-white shadow-md flex-shrink-0" style={{ background: "#f97316" }}>
                     {getInitials(currentUser.name)}
@@ -575,553 +607,100 @@ function TopBar({
   );
 }
 
-// ============================================================
-//  LOCALISATION VIEW (imported from your localisation.tsx)
-// ============================================================
-import { useState as useStateLocal, useRef as useRefLocal } from "react";
-import { Clock as ClockIcon, X as XIcon, MapPin as MapPinIcon, Navigation as NavigationIcon } from "lucide-react";
-
-// ── Types ──────────────────────────────────────────────────────────────────
-type ViolationType = "no-vest" | "no-helmet" | "no-vest + no-helmet";
-type CameraStatus = "online" | "offline" | "warning";
-type NavItem = "dashboard" | "cameras" | "localisation" | "alertes" | "historique";
-
-// Position in camera frame: bx/by = normalized bounding-box center (0–1)
-// mapX/mapY = position on facility floor plan (0–100 %)
-interface PersonPosition {
-  bx: number;       // horiz. center in camera frame  (0=left, 1=right)
-  by: number;       // vert.  center in camera frame  (0=top,  1=bottom)
-  distanceM: number;// estimated distance from camera in metres
-  angleRel: number; // angle relative to camera optical axis, degrees (neg=left, pos=right)
-  mapX: number;     // % x on facility map
-  mapY: number;     // % y on facility map
-}
-
-interface Violation {
-  id: string;
-  camera: string;
-  zone: string;
-  type: ViolationType;
-  date: string;
-  time: string;
-  confidence: number;
-  imageUrl: string;
-  acknowledged: boolean;
-  position: PersonPosition;
-}
-
-interface CameraFeed {
-  id: string;
-  name: string;
-  zone: string;
-  status: CameraStatus;
-  compliant: number;
-  violations: number;
-  lastActivity: string;
-  previewUrl: string;
-  // facility map placement
-  mapX: number;   // % on plan
-  mapY: number;
-  fovAngle: number;     // full FOV in degrees
-  fovDirection: number; // pointing direction in degrees (0=right, 90=down, 180=left, 270=up)
-  fovRange: number;     // range in % of map
-}
-
-// ── Mock Data ──────────────────────────────────────────────────────────────
-const CAMERAS: CameraFeed[] = [
-  {
-    id: "CAM-001", name: "Entrée principale", zone: "Zone A",
-    status: "online", compliant: 24, violations: 3, lastActivity: "il y a 2 min",
-    previewUrl: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?w=400&h=260&fit=crop&auto=format",
-    mapX: 8, mapY: 30, fovAngle: 70, fovDirection: 0, fovRange: 28,
-  },
-  {
-    id: "CAM-002", name: "Atelier assemblage", zone: "Zone B",
-    status: "online", compliant: 18, violations: 7, lastActivity: "il y a 30 sec",
-    previewUrl: "https://images.unsplash.com/photo-1565793979665-e4a40b817161?w=400&h=260&fit=crop&auto=format",
-    mapX: 30, mapY: 52, fovAngle: 80, fovDirection: 355, fovRange: 30,
-  },
-  {
-    id: "CAM-003", name: "Quai de chargement", zone: "Zone C",
-    status: "warning", compliant: 9, violations: 12, lastActivity: "il y a 1 min",
-    previewUrl: "https://images.unsplash.com/photo-1587293852726-70cdb56c2866?w=400&h=260&fit=crop&auto=format",
-    mapX: 88, mapY: 78, fovAngle: 90, fovDirection: 180, fovRange: 32,
-  },
-  {
-    id: "CAM-004", name: "Salle de contrôle", zone: "Zone D",
-    status: "online", compliant: 31, violations: 1, lastActivity: "il y a 5 min",
-    previewUrl: "https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?w=400&h=260&fit=crop&auto=format",
-    mapX: 72, mapY: 12, fovAngle: 60, fovDirection: 90, fovRange: 25,
-  },
-  {
-    id: "CAM-005", name: "Stockage matériaux", zone: "Zone E",
-    status: "offline", compliant: 0, violations: 0, lastActivity: "hors ligne",
-    previewUrl: "https://images.unsplash.com/photo-1553413077-190dd305871c?w=400&h=260&fit=crop&auto=format",
-    mapX: 18, mapY: 82, fovAngle: 70, fovDirection: 10, fovRange: 27,
-  },
-  {
-    id: "CAM-006", name: "Sortie de secours", zone: "Zone F",
-    status: "online", compliant: 6, violations: 2, lastActivity: "il y a 8 min",
-    previewUrl: "https://images.unsplash.com/photo-1504917595217-d4dc5ebe6122?w=400&h=260&fit=crop&auto=format",
-    mapX: 52, mapY: 90, fovAngle: 65, fovDirection: 270, fovRange: 26,
-  },
-];
-
-const VIOLATIONS: Violation[] = [
-  {
-    id: "VIO-2026-0891", camera: "CAM-003", zone: "Zone C – Quai de chargement",
-    type: "no-vest", date: "15/07/2026", time: "09:47:22", confidence: 97.3,
-    imageUrl: "https://images.unsplash.com/photo-1587293852726-70cdb56c2866?w=200&h=140&fit=crop&auto=format",
-    acknowledged: false,
-    position: { bx: 0.42, by: 0.61, distanceM: 6.2, angleRel: -8, mapX: 67, mapY: 74 },
-  },
-  {
-    id: "VIO-2026-0890", camera: "CAM-002", zone: "Zone B – Atelier assemblage",
-    type: "no-helmet", date: "15/07/2026", time: "09:31:05", confidence: 94.1,
-    imageUrl: "https://images.unsplash.com/photo-1565793979665-e4a40b817161?w=200&h=140&fit=crop&auto=format",
-    acknowledged: false,
-    position: { bx: 0.58, by: 0.55, distanceM: 4.8, angleRel: 12, mapX: 45, mapY: 49 },
-  },
-  {
-    id: "VIO-2026-0889", camera: "CAM-003", zone: "Zone C – Quai de chargement",
-    type: "no-vest + no-helmet", date: "15/07/2026", time: "09:14:58", confidence: 99.0,
-    imageUrl: "https://images.unsplash.com/photo-1587293852726-70cdb56c2866?w=200&h=140&fit=crop&auto=format",
-    acknowledged: true,
-    position: { bx: 0.71, by: 0.48, distanceM: 9.1, angleRel: 22, mapX: 61, mapY: 71 },
-  },
-  {
-    id: "VIO-2026-0888", camera: "CAM-001", zone: "Zone A – Entrée principale",
-    type: "no-vest", date: "15/07/2026", time: "08:52:44", confidence: 91.6,
-    imageUrl: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?w=200&h=140&fit=crop&auto=format",
-    acknowledged: true,
-    position: { bx: 0.34, by: 0.67, distanceM: 7.4, angleRel: -15, mapX: 22, mapY: 34 },
-  },
-  {
-    id: "VIO-2026-0887", camera: "CAM-006", zone: "Zone F – Sortie de secours",
-    type: "no-helmet", date: "15/07/2026", time: "08:33:17", confidence: 88.9,
-    imageUrl: "https://images.unsplash.com/photo-1504917595217-d4dc5ebe6122?w=200&h=140&fit=crop&auto=format",
-    acknowledged: true,
-    position: { bx: 0.50, by: 0.42, distanceM: 5.3, angleRel: 3, mapX: 54, mapY: 72 },
-  },
-  {
-    id: "VIO-2026-0886", camera: "CAM-002", zone: "Zone B – Atelier assemblage",
-    type: "no-vest", date: "14/07/2026", time: "16:58:03", confidence: 95.7,
-    imageUrl: "https://images.unsplash.com/photo-1565793979665-e4a40b817161?w=200&h=140&fit=crop&auto=format",
-    acknowledged: true,
-    position: { bx: 0.28, by: 0.70, distanceM: 3.9, angleRel: -20, mapX: 38, mapY: 55 },
-  },
-  {
-    id: "VIO-2026-0885", camera: "CAM-003", zone: "Zone C – Quai de chargement",
-    type: "no-vest + no-helmet", date: "14/07/2026", time: "15:22:41", confidence: 98.2,
-    imageUrl: "https://images.unsplash.com/photo-1587293852726-70cdb56c2866?w=200&h=140&fit=crop&auto=format",
-    acknowledged: true,
-    position: { bx: 0.63, by: 0.57, distanceM: 11.5, angleRel: 18, mapX: 59, mapY: 68 },
-  },
-];
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-/** Build SVG path for camera FOV cone */
-function fovPath(cx: number, cy: number, angleDeg: number, dirDeg: number, rangeR: number) {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const half = angleDeg / 2;
-  const left  = dirDeg - half;
-  const right = dirDeg + half;
-  const x1 = cx + rangeR * Math.cos(toRad(left));
-  const y1 = cy + rangeR * Math.sin(toRad(left));
-  const x2 = cx + rangeR * Math.cos(toRad(right));
-  const y2 = cy + rangeR * Math.sin(toRad(right));
-  return `M ${cx} ${cy} L ${x1} ${y1} A ${rangeR} ${rangeR} 0 0 1 ${x2} ${y2} Z`;
-}
-
-// ── ViolationBadge (dépendance du composant) ─────────────────────────────
-function ViolationBadgeLocal({ type }: { type: ViolationType }) {
-  const map: Record<ViolationType, { label: string; cls: string }> = {
-    "no-vest":             { label: "Pas de gilet",   cls: "bg-amber-500/15 text-amber-400 border border-amber-500/30" },
-    "no-helmet":           { label: "Pas de casque",  cls: "bg-red-500/15 text-red-400 border border-red-500/30" },
-    "no-vest + no-helmet": { label: "Gilet + Casque", cls: "bg-purple-500/15 text-purple-400 border border-purple-500/30" },
-  };
-  const { label, cls } = map[type];
-  return (
-    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded uppercase tracking-wide ${cls}`} style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-      {label}
-    </span>
-  );
-}
-
-// ── Localisation View ──────────────────────────────────────────────────────
-function LocalisationView({ violations, onNav }: { violations: Violation[]; onNav: (v: NavItem) => void }) {
-  const mapRef = useRefLocal<SVGSVGElement>(null);
-  const [selected, setSelected] = useStateLocal<Violation | null>(null);
-  const [hoveredCam, setHoveredCam] = useStateLocal<string | null>(null);
-  const [showAll, setShowAll] = useStateLocal(false);
-
-  const activeViolations = showAll ? violations : violations.filter(v => !v.acknowledged);
-
-  // SVG viewport size
-  const W = 800, H = 520;
-  const px = (pct: number) => (pct / 100) * W;
-  const py = (pct: number) => (pct / 100) * H;
-
-  // Zones overlay data
-  const zones = [
-    { label: "Zone A\nEntrée", x: 0,   y: 0,   w: 22, h: 50, fill: "rgba(59,130,246,0.06)"  },
-    { label: "Zone B\nAtelier", x: 22, y: 35,  w: 35, h: 40, fill: "rgba(168,85,247,0.06)" },
-    { label: "Zone C\nQuai",    x: 57, y: 55,  w: 43, h: 45, fill: "rgba(239,68,68,0.06)"   },
-    { label: "Zone D\nContrôle",x: 55, y: 0,   w: 45, h: 40, fill: "rgba(34,197,94,0.06)"   },
-    { label: "Zone E\nStockage",x: 0,  y: 60,  w: 30, h: 40, fill: "rgba(234,179,8,0.06)"   },
-    { label: "Zone F\nSortie",  x: 40, y: 80,  w: 20, h: 20, fill: "rgba(20,184,166,0.06)"  },
-  ];
-
-  return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h2 className="text-base font-semibold text-foreground">Localisation des infractions</h2>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Position estimée par rapport à la caméra de référence (YOLOv8 bbox)
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowAll(v => !v)}
-            className={`text-xs px-3 py-1.5 rounded border transition-colors ${showAll ? "border-primary text-primary bg-primary/10" : "border-border text-muted-foreground hover:text-foreground"}`}>
-            {showAll ? "Toutes les infractions" : "Non acquittées uniquement"}
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        {/* Map */}
-        <div className="xl:col-span-2 bg-card border border-border rounded-lg overflow-hidden">
-          <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-            <span className="text-xs font-semibold text-foreground uppercase tracking-wider">Plan du site — Vue de dessus</span>
-            <div className="flex items-center gap-4 text-[10px] text-muted-foreground">
-              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-green-400/80 inline-block" />Caméra active</span>
-              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-amber-400/80 inline-block" />Alerte</span>
-              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-red-500 inline-block" />Infraction</span>
-            </div>
-          </div>
-
-          <svg
-            ref={mapRef}
-            viewBox={`0 0 ${W} ${H}`}
-            className="w-full"
-            style={{ background: "#0f1219" }}
-          >
-            {/* Grid */}
-            <defs>
-              <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(255,255,255,0.04)" strokeWidth="1" />
-              </pattern>
-              {CAMERAS.map(cam => (
-                <radialGradient key={`grad-${cam.id}`} id={`fov-${cam.id}`} cx="0%" cy="0%" r="100%">
-                  <stop offset="0%" stopColor={
-                    cam.status === "offline" ? "#6b7280" :
-                    cam.status === "warning"  ? "#f59e0b" : "#22c55e"
-                  } stopOpacity="0.18" />
-                  <stop offset="100%" stopColor={
-                    cam.status === "offline" ? "#6b7280" :
-                    cam.status === "warning"  ? "#f59e0b" : "#22c55e"
-                  } stopOpacity="0" />
-                </radialGradient>
-              ))}
-            </defs>
-
-            <rect width={W} height={H} fill="url(#grid)" />
-
-            {/* Facility outer wall */}
-            <rect x="10" y="10" width={W - 20} height={H - 20}
-              fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="1.5" rx="4" />
-
-            {/* Zone overlays */}
-            {zones.map((z, i) => (
-              <g key={i}>
-                <rect
-                  x={px(z.x) + 10} y={py(z.y) + 10}
-                  width={px(z.w) - (z.x === 0 ? 5 : 0)} height={py(z.h) - (z.y === 0 ? 5 : 0)}
-                  fill={z.fill} stroke="rgba(255,255,255,0.06)" strokeWidth="1" rx="2"
-                />
-                {z.label.split("\n").map((line, li) => (
-                  <text key={li}
-                    x={px(z.x + z.w / 2)} y={py(z.y) + 26 + li * 12}
-                    textAnchor="middle" fill="rgba(255,255,255,0.25)"
-                    fontSize="9" fontFamily="JetBrains Mono, monospace" fontWeight="600"
-                    letterSpacing="0.08em"
-                  >{line}</text>
-                ))}
-              </g>
-            ))}
-
-            {/* Camera FOV cones */}
-            {CAMERAS.map(cam => {
-              const cx = px(cam.mapX), cy = py(cam.mapY);
-              const rangeR = (cam.fovRange / 100) * W;
-              const path = fovPath(cx, cy, cam.fovAngle, cam.fovDirection, rangeR);
-              const isHovered = hoveredCam === cam.id;
-              const color = cam.status === "offline" ? "#6b7280" : cam.status === "warning" ? "#f59e0b" : "#22c55e";
-              return (
-                <g key={cam.id}>
-                  <path d={path} fill={`url(#fov-${cam.id})`}
-                    stroke={color} strokeWidth={isHovered ? 1.5 : 0.8}
-                    strokeOpacity={isHovered ? 0.7 : 0.35}
-                    opacity={cam.status === "offline" ? 0.3 : 1}
-                  />
-                </g>
-              );
-            })}
-
-            {/* Line from camera to violation */}
-            {activeViolations.map(v => {
-              const cam = CAMERAS.find(c => c.id === v.camera);
-              if (!cam) return null;
-              return (
-                <line key={`line-${v.id}`}
-                  x1={px(cam.mapX)} y1={py(cam.mapY)}
-                  x2={px(v.position.mapX)} y2={py(v.position.mapY)}
-                  stroke={v.acknowledged ? "rgba(239,68,68,0.25)" : "rgba(239,68,68,0.6)"}
-                  strokeWidth={v.acknowledged ? 0.8 : 1.2}
-                  strokeDasharray="4 3"
-                />
-              );
-            })}
-
-            {/* Violation markers */}
-            {activeViolations.map(v => {
-              const vx = px(v.position.mapX), vy = py(v.position.mapY);
-              const isSel = selected?.id === v.id;
-              const isNew = !v.acknowledged;
-              return (
-                <g key={v.id} onClick={() => setSelected(isSel ? null : v)} style={{ cursor: "pointer" }}>
-                  {isNew && (
-                    <circle cx={vx} cy={vy} r={14} fill="rgba(239,68,68,0.15)">
-                      <animate attributeName="r" values="10;16;10" dur="2s" repeatCount="indefinite" />
-                      <animate attributeName="opacity" values="0.6;0.1;0.6" dur="2s" repeatCount="indefinite" />
-                    </circle>
-                  )}
-                  <circle cx={vx} cy={vy} r={isSel ? 9 : 7}
-                    fill={isNew ? "#ef4444" : "rgba(239,68,68,0.6)"}
-                    stroke={isSel ? "#ffffff" : "rgba(239,68,68,0.8)"}
-                    strokeWidth={isSel ? 2 : 1}
-                  />
-                  <text x={vx} y={vy + 1} textAnchor="middle" dominantBaseline="middle"
-                    fill="white" fontSize="8" fontWeight="700">!</text>
-                  {isSel && (
-                    <g>
-                      <rect x={vx + 12} y={vy - 20} width={120} height={38} rx="3"
-                        fill="#131720" stroke="rgba(239,68,68,0.5)" strokeWidth="1" />
-                      <text x={vx + 17} y={vy - 8} fill="#e8eaf0" fontSize="9" fontWeight="600">{v.id}</text>
-                      <text x={vx + 17} y={vy + 4} fill="#ef4444" fontSize="8">{v.type.toUpperCase()}</text>
-                      <text x={vx + 17} y={vy + 14} fill="#6b7280" fontSize="8">{v.position.distanceM}m · {v.position.angleRel > 0 ? "+" : ""}{v.position.angleRel}°</text>
-                    </g>
-                  )}
-                </g>
-              );
-            })}
-
-            {/* Camera markers */}
-            {CAMERAS.map(cam => {
-              const cx = px(cam.mapX), cy = py(cam.mapY);
-              const color = cam.status === "offline" ? "#6b7280" : cam.status === "warning" ? "#f59e0b" : "#22c55e";
-              const isHov = hoveredCam === cam.id;
-              return (
-                <g key={cam.id}
-                  onMouseEnter={() => setHoveredCam(cam.id)}
-                  onMouseLeave={() => setHoveredCam(null)}
-                  style={{ cursor: "default" }}>
-                  <circle cx={cx} cy={cy} r={isHov ? 11 : 9}
-                    fill="#131720" stroke={color} strokeWidth={isHov ? 2 : 1.5} />
-                  {/* camera icon — simple rectangle */}
-                  <rect x={cx - 5} y={cy - 3} width={8} height={6} rx="1" fill={color} />
-                  <polygon points={`${cx + 3},${cy - 2} ${cx + 7},${cy - 4} ${cx + 7},${cy + 4} ${cx + 3},${cy + 2}`} fill={color} />
-                  {cam.status === "offline" && (
-                    <line x1={cx - 7} y1={cy - 7} x2={cx + 7} y2={cy + 7}
-                      stroke="#6b7280" strokeWidth="1.5" />
-                  )}
-                  {isHov && (
-                    <g>
-                      <rect x={cx + 14} y={cy - 18} width={108} height={32} rx="3"
-                        fill="#131720" stroke="rgba(255,255,255,0.1)" strokeWidth="1" />
-                      <text x={cx + 19} y={cy - 6} fill="#e8eaf0" fontSize="9" fontWeight="600">{cam.id}</text>
-                      <text x={cx + 19} y={cy + 6} fill="#6b7280" fontSize="8">{cam.name}</text>
-                    </g>
-                  )}
-                  <text x={cx} y={cy + 20} textAnchor="middle"
-                    fill={color} fontSize="8" fontFamily="JetBrains Mono, monospace" fontWeight="600" opacity="0.8">
-                    {cam.id}
-                  </text>
-                </g>
-              );
-            })}
-          </svg>
-        </div>
-
-        {/* Sidebar panel */}
-        <div className="flex flex-col gap-3">
-          {/* Legend */}
-          <div className="bg-card border border-border rounded-lg p-4">
-            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-3">
-              Méthode de localisation
-            </div>
-            <div className="space-y-2 text-xs text-muted-foreground">
-              <p>Le modèle YOLOv8 retourne la <span className="text-foreground">boîte englobante</span> (bx, by, bw, bh) de chaque personne dans le repère image de la caméra.</p>
-              <p>La <span className="text-foreground">distance</span> est estimée via la hauteur de boîte (perspective inverse), et <span className="text-foreground">l'angle</span> via la position horizontale par rapport à l'axe optique.</p>
-              <p>La position 2D sur le plan est calculée par <span className="text-foreground">homographie</span> caméra → sol.</p>
-            </div>
-          </div>
-
-          {/* Violation list */}
-          <div className="bg-card border border-border rounded-lg overflow-hidden flex-1">
-            <div className="px-4 py-3 border-b border-border">
-              <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                {activeViolations.length} infraction{activeViolations.length !== 1 ? "s" : ""} localisée{activeViolations.length !== 1 ? "s" : ""}
-              </div>
-            </div>
-            <div className="overflow-y-auto max-h-80 [scrollbar-width:thin]">
-              {activeViolations.map(v => {
-                const isSel = selected?.id === v.id;
-                return (
-                  <button key={v.id} onClick={() => setSelected(isSel ? null : v)}
-                    className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${isSel ? "bg-accent/5 border-l-2 border-l-accent" : "hover:bg-muted/20"}`}>
-                    <div className="flex items-start justify-between gap-2 mb-1.5">
-                      <ViolationBadgeLocal type={v.type} />
-                      {!v.acknowledged && (
-                        <span className="text-[9px] text-accent font-bold uppercase">NEW</span>
-                      )}
-                    </div>
-                    <div className="text-xs font-semibold text-foreground mb-1">{v.camera} · {v.zone.split("–")[1]?.trim()}</div>
-
-                    {/* Position info */}
-                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 mt-2">
-                      <div className="flex items-center gap-1.5">
-                        <NavigationIcon size={9} className="text-muted-foreground shrink-0" />
-                        <span className="text-[10px] text-muted-foreground">
-                          <span className="text-foreground font-medium">{v.position.distanceM} m</span> de la caméra
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <MapPinIcon size={9} className="text-muted-foreground shrink-0" />
-                        <span className="text-[10px] text-muted-foreground">
-                          Angle <span className="text-foreground font-medium">{v.position.angleRel > 0 ? "+" : ""}{v.position.angleRel}°</span>
-                        </span>
-                      </div>
-                      <div className="col-span-2 flex items-center gap-1.5 mt-0.5">
-                        <span className="text-[10px] text-muted-foreground">
-                          Frame : <span className="text-foreground font-medium" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                            bx={v.position.bx.toFixed(2)} by={v.position.by.toFixed(2)}
-                          </span>
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1 mt-2 text-[10px] text-muted-foreground" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                      <ClockIcon size={9} />
-                      {v.date} {v.time}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Selected detail */}
-          {selected && (
-            <div className="bg-card border border-accent/30 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-semibold text-foreground">{selected.id}</span>
-                <button onClick={() => setSelected(null)} className="text-muted-foreground hover:text-foreground">
-                  <XIcon size={13} />
-                </button>
-              </div>
-              <img src={selected.imageUrl} alt={selected.id}
-                className="w-full h-28 object-cover rounded bg-muted mb-3" />
-
-              {/* Camera-relative position details */}
-              <div className="space-y-2">
-                <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-2">
-                  Position relative à {selected.camera}
-                </div>
-                {[
-                  { label: "Distance estimée", value: `${selected.position.distanceM} m` },
-                  { label: "Angle horizontal",  value: `${selected.position.angleRel > 0 ? "+" : ""}${selected.position.angleRel}° (${selected.position.angleRel < 0 ? "gauche" : "droite"})` },
-                  { label: "Pos. frame horiz.", value: `${(selected.position.bx * 100).toFixed(0)}% (bx=${selected.position.bx.toFixed(2)})` },
-                  { label: "Pos. frame vert.",  value: `${(selected.position.by * 100).toFixed(0)}% (by=${selected.position.by.toFixed(2)})` },
-                  { label: "Coordonnées plan", value: `X=${selected.position.mapX}%, Y=${selected.position.mapY}%` },
-                ].map(({ label, value }) => (
-                  <div key={label} className="flex justify-between items-center">
-                    <span className="text-[10px] text-muted-foreground">{label}</span>
-                    <span className="text-[10px] text-foreground font-semibold" style={{ fontFamily: "'JetBrains Mono', monospace" }}>{value}</span>
-                  </div>
-                ))}
-              </div>
-
-              <button onClick={() => onNav("alertes")} className="mt-3 w-full text-xs py-1.5 bg-primary text-primary-foreground rounded font-semibold hover:opacity-90 transition-opacity">
-                Voir l'alerte
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================
-//  PAGE COMPONENTS (Dashboard, Monitoring, Cameras, Alerts, Incidents, Reports, Settings)
-// ============================================================
+// ─── DASHBOARD PAGE (données réelles) ──────────────────────────────────────
 
 function DashboardPage() {
-  const onlineCount = cameras.filter(c => c.status === "online").length;
-  const totalWorkers = cameras.reduce((s, c) => s + c.workers, 0);
-  const totalViolations = cameras.reduce((s, c) => s + c.violations, 0);
-  const compliancePct = Math.round(((totalWorkers - totalViolations) / totalWorkers) * 100);
+  const { data: overview, connected } = useDashboardEndpoint<DashboardOverview | null>(
+    "/api/dashboard/overview", null, 5000
+  );
+  const { data: trend } = useDashboardEndpoint<TrendPoint[]>(
+    "/api/dashboard/trend?hours=24", [], 60000
+  );
+  const { data: recentAlerts } = useDashboardEndpoint<DashboardAlert[]>(
+    "/api/dashboard/recent-alerts?limit=5", [], 10000
+  );
+  const { data: byTerminal } = useDashboardEndpoint<TerminalViolations[]>(
+    "/api/dashboard/violations-by-terminal", [], 30000
+  );
+  const { data: distribution } = useDashboardEndpoint<DistributionSlice[]>(
+    "/api/dashboard/violation-distribution", [], 30000
+  );
+
+  const totalWorkers = overview?.totalWorkers ?? 0;
+  const compliancePct = overview?.compliancePct ?? 0;
+  const activeAlerts = overview?.activeAlerts ?? 0;
+  const camerasOnline = overview?.camerasOnline ?? 0;
+  const camerasTotal = overview?.camerasTotal ?? 0;
 
   return (
     <div className="space-y-5">
+      {!connected && (
+        <div className="flex items-center gap-2 text-xs text-orange-400 bg-orange-500/5 border border-orange-500/20 rounded-lg px-3 py-2">
+          <AlertTriangle size={13} className="flex-shrink-0" />
+          <span>
+            Impossible de contacter <span className="font-mono">{API_BASE_URL}/api/dashboard/overview</span> —
+            les valeurs affichées peuvent être obsolètes tant que le backend n'est pas joignable.
+          </span>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KPICard label="Total Workers"    value={totalWorkers}           sub="Across all terminals"  icon={User}          trend="+5"   color="blue" />
-        <KPICard label="PPE Compliance"   value={`${compliancePct}%`}    sub="Today's average"       icon={Shield}        trend="+2%"  color="green" />
-        <KPICard label="Active Alerts"    value={2}                      sub="Requires attention"    icon={AlertTriangle} trend="-3"   color="red" />
-        <KPICard label="Cameras Online"   value={`${onlineCount}/${cameras.length}`} sub="2 offline" icon={Camera}                     color="orange" />
+        <KPICard label="Total Workers"  value={totalWorkers}                          sub="Across all terminals" icon={User}          color="blue" />
+        <KPICard label="PPE Compliance" value={`${compliancePct}%`}                   sub="Live average"         icon={Shield}        color="green" />
+        <KPICard label="Active Alerts"  value={activeAlerts}                          sub="Requires attention"   icon={AlertTriangle} color="red" />
+        <KPICard label="Cameras Online" value={`${camerasOnline}/${camerasTotal}`}    sub={`${Math.max(0, camerasTotal - camerasOnline)} offline`} icon={Camera} color="orange" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="lg:col-span-2 rounded-xl border border-border bg-card p-5">
-          <SectionTitle title="PPE Compliance Trend — Today" action={<span className="text-xs text-muted-foreground font-mono">Hourly</span>} />
-          <ResponsiveContainer width="100%" height={210}>
-            <AreaChart data={complianceTrend}>
-              <defs>
-                <linearGradient id="gComp" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor="#22c55e" stopOpacity={0.25} />
-                  <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="gViol" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.25} />
-                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-              <XAxis dataKey="time"        tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis                       tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: "#e2eaf4" }} />
-              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
-              <Area type="monotone" dataKey="compliance"  name="Compliance %"  stroke="#22c55e" strokeWidth={2} fill="url(#gComp)" />
-              <Area type="monotone" dataKey="violations"  name="Violations"    stroke="#ef4444" strokeWidth={2} fill="url(#gViol)" />
-            </AreaChart>
-          </ResponsiveContainer>
+          <SectionTitle title="PPE Compliance Trend — Last 24h" action={<span className="text-xs text-muted-foreground font-mono">Live</span>} />
+          {trend.length === 0 ? (
+            <div className="h-[210px] flex items-center justify-center text-xs text-muted-foreground">
+              Pas encore assez d'historique — un point est enregistré toutes les {Math.round(600 / 60)} min.
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={210}>
+              <AreaChart data={trend}>
+                <defs>
+                  <linearGradient id="gComp" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor="#22c55e" stopOpacity={0.25} />
+                    <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="gViol" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.25} />
+                    <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                <XAxis dataKey="time"        tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
+                <YAxis                       tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
+                <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: "#e2eaf4" }} />
+                <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+                <Area type="monotone" dataKey="compliance"  name="Compliance %"  stroke="#22c55e" strokeWidth={2} fill="url(#gComp)" />
+                <Area type="monotone" dataKey="violations"  name="Violations"    stroke="#ef4444" strokeWidth={2} fill="url(#gViol)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
         </div>
 
         <div className="rounded-xl border border-border bg-card p-5">
-          <SectionTitle title="Violation Distribution" />
-          <ResponsiveContainer width="100%" height={160}>
-            <PieChart>
-              <Pie data={violationTypePie} cx="50%" cy="50%" innerRadius={45} outerRadius={72} paddingAngle={3} dataKey="value">
-                {violationTypePie.map((e, i) => <Cell key={i} fill={e.color} />)}
-              </Pie>
-              <Tooltip contentStyle={tooltipStyle} />
-            </PieChart>
-          </ResponsiveContainer>
+          <SectionTitle title="Violation Distribution" action={<span className="text-xs text-muted-foreground font-mono">24h</span>} />
+          {distribution.length === 0 || distribution.every(d => d.value === 0) ? (
+            <div className="h-[160px] flex items-center justify-center text-xs text-muted-foreground">
+              Aucune donnée pour le moment
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={160}>
+              <PieChart>
+                <Pie data={distribution} cx="50%" cy="50%" innerRadius={45} outerRadius={72} paddingAngle={3} dataKey="value">
+                  {distribution.map((e, i) => <Cell key={i} fill={e.color} />)}
+                </Pie>
+                <Tooltip contentStyle={tooltipStyle} />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
           <div className="space-y-1.5 mt-3">
-            {violationTypePie.map(item => (
+            {distribution.map(item => (
               <div key={item.name} className="flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-sm" style={{ background: item.color }} />
@@ -1138,7 +717,13 @@ function DashboardPage() {
         <div className="lg:col-span-2 rounded-xl border border-border bg-card p-5">
           <SectionTitle title="Recent Alerts" action={<span className="text-xs text-primary cursor-pointer hover:underline">View all →</span>} />
           <div className="space-y-1.5">
-            {initialAlerts.slice(0, 5).map(alert => (
+            {recentAlerts.length === 0 && (
+              <div className="text-center py-6">
+                <CheckCircle size={20} className="text-green-400 mx-auto mb-2" />
+                <div className="text-xs text-muted-foreground">Aucune violation récente</div>
+              </div>
+            )}
+            {recentAlerts.map(alert => (
               <div key={alert.id} className="flex items-center gap-3 py-2.5 px-3 rounded-lg bg-white/[0.025] hover:bg-white/[0.05] transition-colors">
                 <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 bg-red-500/10">
                   <AlertTriangle size={13} className="text-red-400" />
@@ -1180,7 +765,7 @@ function DashboardPage() {
             <div className="pt-2 border-t border-border space-y-2">
               {[
                 { label: "Inference Speed", value: "14 ms avg", icon: Zap },
-                { label: "Active Cameras",  value: `${onlineCount} / ${cameras.length}`, icon: Camera },
+                { label: "Active Cameras",  value: `${camerasOnline} / ${camerasTotal}`, icon: Camera },
                 { label: "AI Model",        value: "YOLOv8s",   icon: Cpu },
               ].map(s => (
                 <div key={s.label} className="flex items-center justify-between text-xs">
@@ -1194,45 +779,34 @@ function DashboardPage() {
       </div>
 
       <div className="rounded-xl border border-border bg-card p-5">
-        <SectionTitle title="Violations by Terminal" action={<span className="text-xs text-muted-foreground font-mono">Today</span>} />
-        <ResponsiveContainer width="100%" height={170}>
-          <BarChart data={violationsByTerminal} barSize={18} barGap={4}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-            <XAxis dataKey="terminal" tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
-            <YAxis                    tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
-            <Tooltip contentStyle={tooltipStyle} />
-            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
-            <Bar dataKey="helmet" name="No Helmet"    fill="#ef4444" radius={[3, 3, 0, 0]} />
-            <Bar dataKey="vest"   name="No Vest"      fill="#f97316" radius={[3, 3, 0, 0]} />
-            <Bar dataKey="both"   name="Both Missing" fill="#a855f7" radius={[3, 3, 0, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
+        <SectionTitle title="Violations by Terminal" action={<span className="text-xs text-muted-foreground font-mono">Last 24h</span>} />
+        {byTerminal.length === 0 ? (
+          <div className="h-[170px] flex items-center justify-center text-xs text-muted-foreground">
+            Aucune violation enregistrée sur les dernières 24h
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height={170}>
+            <BarChart data={byTerminal} barSize={18} barGap={4}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
+              <XAxis dataKey="terminal" tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis                    tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
+              <Tooltip contentStyle={tooltipStyle} />
+              <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+              <Bar dataKey="helmet" name="No Helmet"    fill="#ef4444" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="vest"   name="No Vest"      fill="#f97316" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="both"   name="Both Missing" fill="#a855f7" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
       </div>
     </div>
   );
 }
 
-
 // ─── Live Monitoring Page ─────────────────────────────────────────────────────
-//
-// This page now plays the recorded CCTV clip for the selected camera in a
-// real <video> element (instead of a simulated feed), and overlays live
-// detection boxes polled from the Flask backend. If the backend isn't
-// reachable yet, it automatically falls back to a static demo overlay so the
-// page still renders something meaningful while you're building the API.
-//
-// Swapping to a real IP camera later only means the Flask endpoint switches
-// from `cv2.VideoCapture("clip.mp4")` to `cv2.VideoCapture(rtsp_url)` — this
-// component doesn't change.
-
 
 function LiveMonitoringPage() {
   const [selectedId, setSelectedId] = useState(cameras.find(c => c.videoSrc)?.id ?? cameras[0].id);
-
-  // Custom uploads: the video plays from a local blob URL, but detections
-  // for it come from a real backend camera_id returned by POST /api/upload
-  // once the file has been saved server-side and a worker thread starts
-  // running your model on it.
   const [customVideoUrl, setCustomVideoUrl] = useState<string | null>(null);
   const [customVideoName, setCustomVideoName] = useState<string | null>(null);
   const [uploadCameraId, setUploadCameraId] = useState<string | null>(null);
@@ -1249,12 +823,9 @@ function LiveMonitoringPage() {
   const cam = cameras.find(c => c.id === selectedId) ?? cameras[0];
   const activeVideoSrc = customVideoUrl ?? cam.videoSrc;
 
-  // Which camera_id we poll the Flask backend for: the built-in camera, or
-  // the id it handed back after accepting an uploaded clip.
   const pollCameraId = customVideoUrl ? uploadCameraId : selectedId;
   const { data: detections, connected, checking } = useDetections(pollCameraId ?? "", !!pollCameraId);
 
-  // No fallback/demo data — boxes only ever come from your model via Flask.
   const boxes = detections?.boxes ?? [];
   const workerCount = detections?.workers ?? 0;
   const compliantCount = detections?.compliant ?? 0;
@@ -1264,7 +835,6 @@ function LiveMonitoringPage() {
   const helmetOk = boxes.length - noHelmetCount;
   const vestOk = boxes.length - noVestCount;
 
-  // Reset playback state whenever the selected camera/video changes.
   useEffect(() => {
     setIsPlaying(true);
   }, [selectedId, customVideoUrl]);
@@ -1293,8 +863,6 @@ function LiveMonitoringPage() {
     setUploadState("uploading");
     setUploadError(null);
 
-    // Send the actual file to Flask so your model can run on the real
-    // frames, not just preview them client-side.
     try {
       const form = new FormData();
       form.append("video", file);
@@ -1327,7 +895,6 @@ function LiveMonitoringPage() {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
       <div className="lg:col-span-2 space-y-4">
-        {/* Feed */}
         <div className="rounded-xl border border-border bg-card p-4">
           <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
             <div className="flex items-center gap-3 flex-wrap">
@@ -1384,7 +951,6 @@ function LiveMonitoringPage() {
             </div>
           </div>
 
-          {/* Real CCTV clip with live detection overlay from your model */}
           <div className="relative rounded-lg overflow-hidden bg-black" style={{ aspectRatio: "16/9" }}>
             {activeVideoSrc ? (
               <video
@@ -1414,17 +980,12 @@ function LiveMonitoringPage() {
               </div>
             )}
 
-            {/* Subtle vignette so overlays stay legible over real footage */}
             <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse at center, transparent 65%, rgba(0,0,0,0.35) 100%)" }} />
 
-            {/* Detection boxes — real model output only, nothing synthetic */}
             {activeVideoSrc && modelIsRunning && boxes.map((d, i) => {
               const col = kindColor[d.kind];
               return (
                 <div key={i} className="absolute" style={{ left: `${d.x}%`, top: `${d.y}%`, width: `${d.w}%`, height: `${d.h}%`, border: `2px solid ${col}`, boxShadow: `0 0 12px ${col}50` }}>
-                  {/* Label AU-DESSUS de la boîte, largeur libre (whitespace-nowrap) : ne wrap
-                      plus jamais sur plusieurs lignes même quand la boîte personne est étroite
-                      et le texte de statut long ("NON-CONFORM - Helmet & Vest Missing"). */}
                   <div
                     className="absolute text-white px-1.5 py-0.5 leading-tight whitespace-nowrap"
                     style={{
@@ -1443,7 +1004,6 @@ function LiveMonitoringPage() {
               );
             })}
 
-            {/* Overlays */}
             {activeVideoSrc && (
               <>
                 <div className="absolute top-3 left-3 space-y-1">
@@ -1494,7 +1054,6 @@ function LiveMonitoringPage() {
           )}
         </div>
 
-        {/* Detection stats — all derived from real model output */}
         <div className="grid grid-cols-5 gap-3">
           {[
             { label: "Person",    value: workerCount,      color: "#3b82f6" },
@@ -1511,7 +1070,6 @@ function LiveMonitoringPage() {
         </div>
       </div>
 
-      {/* Right panel */}
       <div className="space-y-4">
         <div className="rounded-xl border border-border bg-card p-4">
           <div className="text-sm font-semibold text-foreground mb-3">Camera Info</div>
@@ -2179,7 +1737,7 @@ export default function App() {
   });
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     const saved = localStorage.getItem("marsa_theme");
-    return saved !== null ? saved === "dark" : false; // Default to Light Mode (false)
+    return saved !== null ? saved === "dark" : false;
   });
   const [collapsed, setCollapsed] = useState(false);
   const [currentUser, setCurrentUser] = useState<{ name: string; email: string; role: string; terminal: string } | null>(() => {
@@ -2212,11 +1770,6 @@ export default function App() {
       localStorage.removeItem("marsa_user");
     }
   }, [currentUser]);
-
-  // Convert VIOLATIONS to a format compatible with the localisation view
-  const localisationViolations = VIOLATIONS.map(v => ({
-    ...v,
-  }));
 
   const isAdmin = !!(currentUser?.role && (currentUser.role.toLowerCase().includes("admin") || currentUser.role.toLowerCase().includes("administrateur")));
 
@@ -2255,7 +1808,7 @@ export default function App() {
             {page === "dashboard"  && <DashboardPage />}
             {page === "monitoring" && <LiveMonitoringPage />}
             {page === "cameras"    && <CamerasPage />}
-            {page === "localisation" && <LocalisationView violations={localisationViolations} onNav={(v) => setPage(v === "alertes" ? "alerts" : "dashboard")} />}
+            {page === "localisation" && <LocalisationView onNav={(v) => setPage(v === "alertes" ? "alerts" : "dashboard")} />}
             {page === "alerts"     && <AlertsPage />}
             {page === "incidents"  && <IncidentHistoryPage />}
             {page === "reports"    && <ReportsPage />}
