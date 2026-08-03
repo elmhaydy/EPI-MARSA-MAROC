@@ -598,7 +598,7 @@ def snapshot_worker():
                 db.session.commit()
         except Exception as exc:
             print(f"Snapshot insert error: {exc}", flush=True)
-=======
+
 # ─── Database & Auth Configuration ───────────────────────────────────────────
 
 from flask_sqlalchemy import SQLAlchemy
@@ -616,8 +616,7 @@ app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL or SQLITE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "marsa_maroc_epi_secret_key_2026")
 
-db = SQLAlchemy(app)
->>>>>>> 87dd2814970da705f615b1f8af22dad04c3955b0
+
 
 
 threading.Thread(target=snapshot_worker, daemon=True).start()
@@ -641,7 +640,6 @@ def handle_exception(e):
     print("GLOBAL EXCEPTION HANDLER:", e, flush=True)
     traceback.print_exc()
     return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
-=======
 class AuditLog(db.Model):
     __tablename__ = "audit_logs"
     id = db.Column(db.Integer, primary_key=True)
@@ -1234,7 +1232,6 @@ with app.app_context():
         print("SQL Database (marsa_epi.db) initialized successfully, users, audit logs & notifications seeded.", flush=True)
     except Exception as err:
         print(f"DB init note: {err}", flush=True)
->>>>>>> 87dd2814970da705f615b1f8af22dad04c3955b0
 
 
 # ─── Routes ──────────────────────────────────────────────────────────────────

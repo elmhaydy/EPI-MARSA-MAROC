@@ -134,8 +134,6 @@ type DashboardOverview = {
   camerasTotal: number;
 };
 
-type TrendPoint = { time: string; compliance: number; violations: number };
-
 type DashboardAlert = {
   id: string;
   worker: string;
