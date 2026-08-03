@@ -1334,7 +1334,12 @@ def clear_all_notifications():
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "cameras": list(camera_states.keys())})
+    return jsonify({
+        "status": "ok",
+        "model": "YOLOv8s",
+        "ai_engine": "active",
+        "cameras": list(camera_states.keys()) if "camera_states" in globals() else []
+    })
 
 
 if __name__ == "__main__":

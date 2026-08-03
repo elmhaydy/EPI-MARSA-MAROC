@@ -7,7 +7,7 @@ import {
   LayoutDashboard, Monitor, Camera, Bell, History, FileText, Settings,
   Shield, AlertTriangle, CheckCircle, WifiOff, Search, Download, Eye,
   Check, User, Cpu, MapPin, TrendingUp, TrendingDown, Sun, Moon,
-  Maximize, ChevronLeft, ChevronRight, ChevronDown, Plus, Edit, Trash2, Radio, Zap,
+  Maximize, ChevronLeft, ChevronRight, ChevronDown, Plus, Edit, Trash2, Radio, Zap, Star,
   Activity, Play, Pause, Upload, PlugZap, Plug, LogOut, LogIn, UserPlus, Users,
 } from "lucide-react";
 import { AuthPage } from "./AuthPage";
@@ -204,6 +204,53 @@ function useDetections(cameraId: string, enabled: boolean) {
   return { data, connected, checking };
 }
 
+function useBackendHealth() {
+  const [isOnline, setIsOnline] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const checkHealth = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/health`, { cache: "no-store" });
+        if (!cancelled) {
+          setIsOnline(res.ok);
+        }
+      } catch {
+        if (!cancelled) {
+          setIsOnline(false);
+        }
+      }
+    };
+
+    checkHealth();
+    const id = setInterval(checkHealth, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  return isOnline;
+}
+
+function MarsaStarLogo({ className = "w-6 h-6" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 100 100" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* White / Light Facet */}
+      <path
+        d="M50 5 L60.6 35.4 L92.8 36.1 L67.1 55.6 L76.5 86.4 L50 68 Z"
+        fill="#ffffff"
+      />
+      {/* Bright Cyan Blue Facet */}
+      <path
+        d="M50 5 L50 68 L23.5 86.4 L32.9 55.6 L7.2 36.1 L39.4 35.4 Z"
+        fill="#0082c8"
+      />
+    </svg>
+  );
+}
+
 // ─── Shared Components ────────────────────────────────────────────────────────
 
 const tooltipStyle = {
@@ -296,6 +343,7 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, currentUser }: {
   currentUser: { name: string; email: string; role: string; terminal: string } | null;
 }) {
   const isAdmin = !!(currentUser?.role && (currentUser.role.toLowerCase().includes("admin") || currentUser.role.toLowerCase().includes("administrateur")));
+  const isOnline = useBackendHealth();
 
   const visibleNavItems = navItems.filter(item => {
     if (item.id === "users" && !isAdmin) return false;
@@ -308,23 +356,45 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, currentUser }: {
       style={{ width: collapsed ? 60 : 232, background: "var(--sidebar)" }}
     >
       {/* Brand Header */}
-      <div className="flex items-center justify-between px-3 py-4 border-b border-sidebar-border gap-2">
-        <div className="flex-1 flex items-center justify-start min-w-0 px-1">
-          <img
-            src={marsaLogo}
-            alt="Marsa Maroc Logo"
-            className={`${collapsed ? "h-6" : "h-10"} w-auto max-w-full object-contain filter brightness-0 invert opacity-95 hover:opacity-100 transition-opacity`}
-            style={{ mixBlendMode: "screen" }}
-          />
-        </div>
-        <button
-          onClick={() => setCollapsed(!collapsed)}
-          className="p-1.5 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
-          style={{ color: "var(--sidebar-foreground)" }}
-          title={collapsed ? "Agrandir le menu" : "Réduire le menu"}
-        >
-          {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-        </button>
+      <div className={`flex items-center border-b border-sidebar-border py-3 px-3.5 transition-all ${collapsed ? "flex-col justify-center gap-3" : "justify-between gap-2"}`}>
+        {collapsed ? (
+          <>
+            <div
+              className="flex items-center justify-center p-1 cursor-pointer hover:scale-110 transition-transform"
+              title="Marsa Maroc — EPI"
+              onClick={() => setCollapsed(false)}
+            >
+              <MarsaStarLogo className="w-8 h-8 drop-shadow" />
+            </div>
+            <button
+              onClick={() => setCollapsed(false)}
+              className="p-1.5 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
+              style={{ color: "var(--sidebar-foreground)" }}
+              title="Agrandir le menu"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="flex-1 flex items-center justify-start min-w-0 px-1">
+              <img
+                src={marsaLogo}
+                alt="Marsa Maroc Logo"
+                className="h-10 w-auto max-w-full object-contain filter brightness-0 invert opacity-95 hover:opacity-100 transition-opacity"
+                style={{ mixBlendMode: "screen" }}
+              />
+            </div>
+            <button
+              onClick={() => setCollapsed(true)}
+              className="p-1.5 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
+              style={{ color: "var(--sidebar-foreground)" }}
+              title="Réduire le menu"
+            >
+              <ChevronLeft size={14} />
+            </button>
+          </>
+        )}
       </div>
 
       {/* Nav */}
@@ -336,7 +406,7 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, currentUser }: {
               key={item.id}
               onClick={() => setPage(item.id)}
               title={collapsed ? item.label : undefined}
-              className="w-full flex items-center gap-3 px-2.5 py-2.5 rounded-lg text-sm transition-all duration-150 relative"
+              className={`w-full flex items-center gap-3 px-2.5 py-2.5 rounded-lg text-sm transition-all duration-150 relative ${collapsed ? "justify-center" : ""}`}
               style={active
                 ? { background: "#f97316", color: "#fff" }
                 : { color: "var(--sidebar-foreground)" }
@@ -365,27 +435,128 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, currentUser }: {
 
       {/* Footer status */}
       <div className="border-t border-sidebar-border p-2 space-y-1.5">
+        {/* AI Engine Status */}
         <div
-          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg bg-green-500/10 ${collapsed ? "justify-center" : ""}`}
-          title={collapsed ? "YOLOv8s Active" : undefined}
+          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg transition-all ${
+            isOnline === true
+              ? "bg-green-500/10 border border-green-500/20"
+              : isOnline === false
+              ? "bg-amber-500/10 border border-amber-500/20"
+              : "bg-blue-500/10 border border-blue-500/20"
+          } ${collapsed ? "justify-center" : ""}`}
+          title={
+            collapsed
+              ? isOnline === true
+                ? "YOLOv8s Actif (Connecté)"
+                : isOnline === false
+                ? "IA Mode Démo (Injoignable)"
+                : "Vérification..."
+              : undefined
+          }
         >
-          <Cpu size={12} className="text-green-400 flex-shrink-0" />
+          {isOnline === true ? (
+            <Cpu size={12} className="text-green-400 flex-shrink-0 animate-pulse" />
+          ) : isOnline === false ? (
+            <Cpu size={12} className="text-amber-400 flex-shrink-0 opacity-70" />
+          ) : (
+            <Activity size={12} className="text-blue-400 flex-shrink-0 animate-spin" />
+          )}
+
           {!collapsed && (
-            <div>
-              <div className="text-xs font-medium text-green-400 leading-none">YOLOv8s Active</div>
-              <div className="text-xs text-green-500/60 mt-0.5">AI Engine Running</div>
+            <div className="min-w-0 flex-1">
+              <div
+                className={`text-xs font-medium leading-none truncate ${
+                  isOnline === true
+                    ? "text-green-400"
+                    : isOnline === false
+                    ? "text-amber-400"
+                    : "text-blue-400"
+                }`}
+              >
+                {isOnline === true
+                  ? "YOLOv8s Actif"
+                  : isOnline === false
+                  ? "IA Mode Démo"
+                  : "Vérification..."}
+              </div>
+              <div
+                className={`text-xs mt-0.5 truncate ${
+                  isOnline === true
+                    ? "text-green-500/70"
+                    : isOnline === false
+                    ? "text-amber-500/70"
+                    : "text-blue-500/70"
+                }`}
+              >
+                {isOnline === true
+                  ? "Moteur IA en cours"
+                  : isOnline === false
+                  ? "Backend non détecté"
+                  : "Test de connexion..."}
+              </div>
             </div>
           )}
         </div>
+
+        {/* Backend Connectivity Status */}
         <div
-          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg bg-blue-500/10 ${collapsed ? "justify-center" : ""}`}
-          title={collapsed ? "System Online" : undefined}
+          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg transition-all ${
+            isOnline === true
+              ? "bg-blue-500/10 border border-blue-500/20"
+              : isOnline === false
+              ? "bg-red-500/10 border border-red-500/20"
+              : "bg-gray-500/10 border border-gray-500/20"
+          } ${collapsed ? "justify-center" : ""}`}
+          title={
+            collapsed
+              ? isOnline === true
+                ? "Serveur Backend En Ligne (Port 5000)"
+                : isOnline === false
+                ? "Serveur Backend Hors Ligne"
+                : "Connexion..."
+              : undefined
+          }
         >
-          <Radio size={12} className="text-blue-400 flex-shrink-0" />
+          {isOnline === true ? (
+            <Radio size={12} className="text-blue-400 flex-shrink-0" />
+          ) : isOnline === false ? (
+            <WifiOff size={12} className="text-red-400 flex-shrink-0 animate-pulse" />
+          ) : (
+            <Radio size={12} className="text-gray-400 flex-shrink-0" />
+          )}
+
           {!collapsed && (
-            <div>
-              <div className="text-xs font-medium text-blue-400 leading-none">System Online</div>
-              <div className="text-xs text-blue-500/60 mt-0.5">All Services Active</div>
+            <div className="min-w-0 flex-1">
+              <div
+                className={`text-xs font-medium leading-none truncate ${
+                  isOnline === true
+                    ? "text-blue-400"
+                    : isOnline === false
+                    ? "text-red-400"
+                    : "text-gray-400"
+                }`}
+              >
+                {isOnline === true
+                  ? "Backend En Ligne"
+                  : isOnline === false
+                  ? "Backend Hors Ligne"
+                  : "Connexion..."}
+              </div>
+              <div
+                className={`text-xs mt-0.5 truncate ${
+                  isOnline === true
+                    ? "text-blue-500/70"
+                    : isOnline === false
+                    ? "text-red-500/70"
+                    : "text-gray-500/70"
+                }`}
+              >
+                {isOnline === true
+                  ? "API Flask (Port 5000)"
+                  : isOnline === false
+                  ? "Simulation Frontend"
+                  : "Vérification..."}
+              </div>
             </div>
           )}
         </div>
@@ -458,11 +629,6 @@ function TopBar({
         <div className="hidden sm:flex items-center gap-2 text-xs text-muted-foreground font-mono">
           <span>{date}</span>
           <span className="text-foreground font-semibold">{time}</span>
-        </div>
-        <div className="h-4 w-px bg-border" />
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-500/10 text-xs font-medium text-green-400">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-          YOLOv8s
         </div>
         <div className="h-4 w-px bg-border" />
         <NotificationCenter apiBaseUrl={API_BASE_URL} onNavigate={(p) => setPage(p as Page)} />
