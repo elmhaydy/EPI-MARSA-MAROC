@@ -8,14 +8,14 @@ import {
   LayoutDashboard, Monitor, Camera, Bell, History, FileText, Settings,
   Shield, AlertTriangle, CheckCircle, WifiOff, Search, Download, Eye,
   Check, User, Cpu, MapPin, TrendingUp, TrendingDown, Sun, Moon,
-  Maximize, ChevronLeft, ChevronRight, ChevronDown, Plus, Edit, Trash2, Radio, Zap,
+  Maximize, ChevronLeft, ChevronRight, ChevronDown, Plus, Edit, Trash2, Radio, Zap, Star,
   Activity, Play, Pause, Upload, PlugZap, Plug, LogOut, LogIn, UserPlus, Users,
 } from "lucide-react";
 import { AuthPage } from "./AuthPage";
 import { UsersPage } from "./UsersPage";
+import { AuditLogsView } from "./AuditLogsView";
+import { NotificationCenter } from "./NotificationCenter";
 import marsaLogo from "../../asset/img/MARSA_LOGO.png";
-
-
 
 // ─── Backend Configuration ─────────────────────────────────────────────────
 const API_BASE_URL = "http://localhost:5000";
@@ -110,7 +110,7 @@ const violationTypePie = [
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Page = "dashboard" | "monitoring" | "cameras" | "alerts" | "incidents" | "reports" | "settings" | "localisation" | "users" | "login";
+type Page = "dashboard" | "monitoring" | "cameras" | "alerts" | "incidents" | "reports" | "settings" | "localisation" | "users" | "audit-logs" | "login";
 
 type DetectionBox = {
   x: number; y: number; w: number; h: number;
@@ -162,6 +162,7 @@ const navItems: { id: Page; label: string; icon: React.ElementType; badge?: numb
   { id: "incidents",  label: "Incident History", icon: History },
   { id: "reports",    label: "Reports",          icon: FileText },
   { id: "users",      label: "Utilisateurs",     icon: Users },
+  { id: "audit-logs", label: "Journal d'Audit",  icon: Shield },
   { id: "settings",   label: "Settings",         icon: Settings },
 ];
 
@@ -208,6 +209,107 @@ function useDetections(cameraId: string, enabled: boolean) {
   }, [cameraId, enabled]);
 
   return { data, connected, checking };
+}
+type ReportSummary = { avg_compliance: number; total_violations: number; workers_monitored: number; detection_accuracy: number };
+type TrendPoint = { label: string; compliance: number; violations: number };
+type TerminalStat = { terminal: string; helmet: number; vest: number; both: number };
+type ViolationTypeStat = { name: string; value: number; color: string };
+
+
+function useBackendHealth() {
+  const [isOnline, setIsOnline] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const checkHealth = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/health`, { cache: "no-store" });
+        if (!cancelled) {
+          setIsOnline(res.ok);
+        }
+      } catch {
+        if (!cancelled) {
+          setIsOnline(false);
+        }
+      }
+    };
+
+    checkHealth();
+    const id = setInterval(checkHealth, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  return isOnline;
+}
+
+function MarsaStarLogo({ className = "w-6 h-6" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 100 100" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* White / Light Facet */}
+      <path
+        d="M50 5 L60.6 35.4 L92.8 36.1 L67.1 55.6 L76.5 86.4 L50 68 Z"
+        fill="#ffffff"
+      />
+      {/* Bright Cyan Blue Facet */}
+      <path
+        d="M50 5 L50 68 L23.5 86.4 L32.9 55.6 L7.2 36.1 L39.4 35.4 Z"
+        fill="#0082c8"
+      />
+    </svg>
+  );
+}
+
+
+function useReportsData(reportType: "Daily" | "Weekly" | "Monthly") {
+  const [summary, setSummary] = useState<ReportSummary | null>(null);
+  const [trend, setTrend] = useState<TrendPoint[]>([]);
+  const [byTerminal, setByTerminal] = useState<TerminalStat[]>([]);
+  const [violationTypes, setViolationTypes] = useState<ViolationTypeStat[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const range = reportType === "Daily" ? "daily" : reportType === "Monthly" ? "monthly" : "weekly";
+    setLoading(true);
+    setError(null);
+
+    (async () => {
+      try {
+        const [s, t, bt, vt] = await Promise.all([
+          fetch(`${API_BASE_URL}/api/reports/summary?range=${range}`).then(r => r.json()),
+          fetch(`${API_BASE_URL}/api/reports/trend?range=${range}`).then(r => r.json()),
+          fetch(`${API_BASE_URL}/api/reports/by-terminal?range=${range}`).then(r => r.json()),
+          fetch(`${API_BASE_URL}/api/reports/violation-types?range=${range}`).then(r => r.json()),
+        ]);
+        if (cancelled) return;
+        setSummary(s); setTrend(t); setByTerminal(bt); setViolationTypes(vt);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Impossible de charger les rapports");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [reportType]);
+
+  return { summary, trend, byTerminal, violationTypes, loading, error };
+}
+
+function exportCsv(filename: string, rows: Record<string, string | number>[]) {
+  if (!rows.length) return;
+  const headers = Object.keys(rows[0]);
+  const csv = [headers.join(";"), ...rows.map(r => headers.map(h => r[h]).join(";"))].join("\n");
+  const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
 }
 
 function useDashboardEndpoint<T>(path: string, fallback: T, intervalMs = DASHBOARD_POLL_MS) {
@@ -331,6 +433,7 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, currentUser }: {
   currentUser: { name: string; email: string; role: string; terminal: string } | null;
 }) {
   const isAdmin = !!(currentUser?.role && (currentUser.role.toLowerCase().includes("admin") || currentUser.role.toLowerCase().includes("administrateur")));
+  const isOnline = useBackendHealth();
 
   const visibleNavItems = navItems.filter(item => {
     if (item.id === "users" && !isAdmin) return false;
@@ -343,23 +446,45 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, currentUser }: {
       style={{ width: collapsed ? 60 : 232, background: "var(--sidebar)" }}
     >
       {/* Brand Header */}
-      <div className="flex items-center justify-between px-3 py-4 border-b border-sidebar-border gap-2">
-        <div className="flex-1 flex items-center justify-start min-w-0 px-1">
-          <img
-            src={marsaLogo}
-            alt="Marsa Maroc Logo"
-            className={`${collapsed ? "h-6" : "h-10"} w-auto max-w-full object-contain filter brightness-0 invert opacity-95 hover:opacity-100 transition-opacity`}
-            style={{ mixBlendMode: "screen" }}
-          />
-        </div>
-        <button
-          onClick={() => setCollapsed(!collapsed)}
-          className="p-1.5 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
-          style={{ color: "var(--sidebar-foreground)" }}
-          title={collapsed ? "Agrandir le menu" : "Réduire le menu"}
-        >
-          {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-        </button>
+      <div className={`flex items-center border-b border-sidebar-border py-3 px-3.5 transition-all ${collapsed ? "flex-col justify-center gap-3" : "justify-between gap-2"}`}>
+        {collapsed ? (
+          <>
+            <div
+              className="flex items-center justify-center p-1 cursor-pointer hover:scale-110 transition-transform"
+              title="Marsa Maroc — EPI"
+              onClick={() => setCollapsed(false)}
+            >
+              <MarsaStarLogo className="w-8 h-8 drop-shadow" />
+            </div>
+            <button
+              onClick={() => setCollapsed(false)}
+              className="p-1.5 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
+              style={{ color: "var(--sidebar-foreground)" }}
+              title="Agrandir le menu"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="flex-1 flex items-center justify-start min-w-0 px-1">
+              <img
+                src={marsaLogo}
+                alt="Marsa Maroc Logo"
+                className="h-10 w-auto max-w-full object-contain filter brightness-0 invert opacity-95 hover:opacity-100 transition-opacity"
+                style={{ mixBlendMode: "screen" }}
+              />
+            </div>
+            <button
+              onClick={() => setCollapsed(true)}
+              className="p-1.5 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0"
+              style={{ color: "var(--sidebar-foreground)" }}
+              title="Réduire le menu"
+            >
+              <ChevronLeft size={14} />
+            </button>
+          </>
+        )}
       </div>
 
       {/* Nav */}
@@ -371,7 +496,7 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, currentUser }: {
               key={item.id}
               onClick={() => setPage(item.id)}
               title={collapsed ? item.label : undefined}
-              className="w-full flex items-center gap-3 px-2.5 py-2.5 rounded-lg text-sm transition-all duration-150 relative"
+              className={`w-full flex items-center gap-3 px-2.5 py-2.5 rounded-lg text-sm transition-all duration-150 relative ${collapsed ? "justify-center" : ""}`}
               style={active
                 ? { background: "#f97316", color: "#fff" }
                 : { color: "var(--sidebar-foreground)" }
@@ -400,27 +525,128 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, currentUser }: {
 
       {/* Footer status */}
       <div className="border-t border-sidebar-border p-2 space-y-1.5">
+        {/* AI Engine Status */}
         <div
-          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg bg-green-500/10 ${collapsed ? "justify-center" : ""}`}
-          title={collapsed ? "YOLOv8s Active" : undefined}
+          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg transition-all ${
+            isOnline === true
+              ? "bg-green-500/10 border border-green-500/20"
+              : isOnline === false
+              ? "bg-amber-500/10 border border-amber-500/20"
+              : "bg-blue-500/10 border border-blue-500/20"
+          } ${collapsed ? "justify-center" : ""}`}
+          title={
+            collapsed
+              ? isOnline === true
+                ? "YOLOv8s Actif (Connecté)"
+                : isOnline === false
+                ? "IA Mode Démo (Injoignable)"
+                : "Vérification..."
+              : undefined
+          }
         >
-          <Cpu size={12} className="text-green-400 flex-shrink-0" />
+          {isOnline === true ? (
+            <Cpu size={12} className="text-green-400 flex-shrink-0 animate-pulse" />
+          ) : isOnline === false ? (
+            <Cpu size={12} className="text-amber-400 flex-shrink-0 opacity-70" />
+          ) : (
+            <Activity size={12} className="text-blue-400 flex-shrink-0 animate-spin" />
+          )}
+
           {!collapsed && (
-            <div>
-              <div className="text-xs font-medium text-green-400 leading-none">YOLOv8s Active</div>
-              <div className="text-xs text-green-500/60 mt-0.5">AI Engine Running</div>
+            <div className="min-w-0 flex-1">
+              <div
+                className={`text-xs font-medium leading-none truncate ${
+                  isOnline === true
+                    ? "text-green-400"
+                    : isOnline === false
+                    ? "text-amber-400"
+                    : "text-blue-400"
+                }`}
+              >
+                {isOnline === true
+                  ? "YOLOv8s Actif"
+                  : isOnline === false
+                  ? "IA Mode Démo"
+                  : "Vérification..."}
+              </div>
+              <div
+                className={`text-xs mt-0.5 truncate ${
+                  isOnline === true
+                    ? "text-green-500/70"
+                    : isOnline === false
+                    ? "text-amber-500/70"
+                    : "text-blue-500/70"
+                }`}
+              >
+                {isOnline === true
+                  ? "Moteur IA en cours"
+                  : isOnline === false
+                  ? "Backend non détecté"
+                  : "Test de connexion..."}
+              </div>
             </div>
           )}
         </div>
+
+        {/* Backend Connectivity Status */}
         <div
-          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg bg-blue-500/10 ${collapsed ? "justify-center" : ""}`}
-          title={collapsed ? "System Online" : undefined}
+          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg transition-all ${
+            isOnline === true
+              ? "bg-blue-500/10 border border-blue-500/20"
+              : isOnline === false
+              ? "bg-red-500/10 border border-red-500/20"
+              : "bg-gray-500/10 border border-gray-500/20"
+          } ${collapsed ? "justify-center" : ""}`}
+          title={
+            collapsed
+              ? isOnline === true
+                ? "Serveur Backend En Ligne (Port 5000)"
+                : isOnline === false
+                ? "Serveur Backend Hors Ligne"
+                : "Connexion..."
+              : undefined
+          }
         >
-          <Radio size={12} className="text-blue-400 flex-shrink-0" />
+          {isOnline === true ? (
+            <Radio size={12} className="text-blue-400 flex-shrink-0" />
+          ) : isOnline === false ? (
+            <WifiOff size={12} className="text-red-400 flex-shrink-0 animate-pulse" />
+          ) : (
+            <Radio size={12} className="text-gray-400 flex-shrink-0" />
+          )}
+
           {!collapsed && (
-            <div>
-              <div className="text-xs font-medium text-blue-400 leading-none">System Online</div>
-              <div className="text-xs text-blue-500/60 mt-0.5">All Services Active</div>
+            <div className="min-w-0 flex-1">
+              <div
+                className={`text-xs font-medium leading-none truncate ${
+                  isOnline === true
+                    ? "text-blue-400"
+                    : isOnline === false
+                    ? "text-red-400"
+                    : "text-gray-400"
+                }`}
+              >
+                {isOnline === true
+                  ? "Backend En Ligne"
+                  : isOnline === false
+                  ? "Backend Hors Ligne"
+                  : "Connexion..."}
+              </div>
+              <div
+                className={`text-xs mt-0.5 truncate ${
+                  isOnline === true
+                    ? "text-blue-500/70"
+                    : isOnline === false
+                    ? "text-red-500/70"
+                    : "text-gray-500/70"
+                }`}
+              >
+                {isOnline === true
+                  ? "API Flask (Port 5000)"
+                  : isOnline === false
+                  ? "Simulation Frontend"
+                  : "Vérification..."}
+              </div>
             </div>
           )}
         </div>
@@ -440,6 +666,7 @@ const pageLabels: Record<Page, string> = {
   incidents:  "Incident History",
   reports:    "Reports & Analytics",
   users:      "Gestion des Utilisateurs",
+  "audit-logs": "Journal d'Audit & Sécurité",
   settings:   "System Settings",
   login:      "Espace Connexion",
 };
@@ -481,7 +708,7 @@ function TopBar({
   }, []);
 
   return (
-    <header className="h-13 flex items-center px-5 border-b border-border bg-card/60 backdrop-blur-sm gap-4 flex-shrink-0" style={{ height: 52 }}>
+    <header className="relative z-50 flex items-center px-5 border-b border-border bg-card/60 backdrop-blur-sm gap-4 flex-shrink-0" style={{ height: 52 }}>
       <div className="flex items-center gap-2">
         <Activity size={14} className="text-primary" />
         <span className="text-sm font-semibold text-foreground">{pageLabels[page]}</span>
@@ -493,15 +720,7 @@ function TopBar({
           <span className="text-foreground font-semibold">{time}</span>
         </div>
         <div className="h-4 w-px bg-border" />
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-500/10 text-xs font-medium text-green-400">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-          YOLOv8s
-        </div>
-        <div className="h-4 w-px bg-border" />
-        <button className="relative p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors">
-          <Bell size={15} />
-          <span className="absolute top-0.5 right-0.5 w-2 h-2 bg-red-500 rounded-full" />
-        </button>
+        <NotificationCenter apiBaseUrl={API_BASE_URL} onNavigate={(p) => setPage(p as Page)} />
         <button
           onClick={() => setDarkMode(!darkMode)}
           className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors"
@@ -559,6 +778,14 @@ function TopBar({
                   )}
 
                   <button
+                    onClick={() => { setPage("audit-logs"); setDropdownOpen(false); }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-foreground hover:bg-primary/10 hover:text-primary transition-colors text-left font-medium"
+                  >
+                    <Shield size={15} className="text-primary" />
+                    <span>Journal d'Audit & Sécurité</span>
+                  </button>
+
+                  <button
                     onClick={() => { setPage("settings"); setDropdownOpen(false); }}
                     className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-foreground hover:bg-primary/10 hover:text-primary transition-colors text-left font-medium"
                   >
@@ -572,9 +799,9 @@ function TopBar({
                   >
                     <div className="flex items-center gap-2.5">
                       {darkMode ? <Sun size={15} className="text-amber-400" /> : <Moon size={15} className="text-indigo-400" />}
-                      <span>{darkMode ? "Mode Clair" : "Mode Sombre"}</span>
+                      <span>Mode d'Affichage</span>
                     </div>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                    <span className="text-[10px] px-2 py-0.5 rounded font-semibold bg-primary/10 text-primary border border-primary/20">
                       {darkMode ? "Sombre" : "Clair"}
                     </span>
                   </button>
@@ -1402,8 +1629,28 @@ function IncidentHistoryPage() {
 
 function ReportsPage() {
   const [reportType, setReportType] = useState<"Daily" | "Weekly" | "Monthly">("Weekly");
-  const chartData = reportType === "Daily" ? complianceTrend : reportType === "Weekly" ? weeklyCompliance : monthlyCompliance;
-  const xKey = reportType === "Daily" ? "time" : reportType === "Weekly" ? "day" : "week";
+  const { summary, trend, byTerminal, violationTypes, loading, error } = useReportsData(reportType);
+  const [sendState, setSendState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [sendMessage, setSendMessage] = useState<string | null>(null);
+
+  const handleSendReport = async () => {
+    setSendState("sending");
+    setSendMessage(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/reports/send-daily`, { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      setSendState("sent");
+      setSendMessage(json.message);
+      setTimeout(() => setSendState("idle"), 4000);
+    } catch (err) {
+      setSendState("error");
+      setSendMessage(err instanceof Error ? err.message : "Échec de l'envoi");
+    }
+  };
+
+  const xKey = "label";
+  const hasData = (summary?.workers_monitored ?? 0) > 0;
 
   return (
     <div className="space-y-5">
@@ -1416,26 +1663,55 @@ function ReportsPage() {
           ))}
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <button className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border border-border text-foreground hover:bg-white/5 transition-colors"><Download size={13} />PDF</button>
-          <button className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border border-border text-foreground hover:bg-white/5 transition-colors"><Download size={13} />Excel</button>
-        </div>
+        <button
+          onClick={() => exportCsv(`rapport_${reportType.toLowerCase()}.csv`, trend as any)}
+          disabled={!trend.length}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border border-border text-foreground hover:bg-white/5 transition-colors disabled:opacity-40"
+        >
+          <Download size={13} />CSV
+        </button>
+        <button
+          onClick={handleSendReport}
+          disabled={sendState === "sending"}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          style={{ background: sendState === "error" ? "#ef4444" : sendState === "sent" ? "#22c55e" : "#f97316" }}
+        >
+          {sendState === "sending" && <span className="w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />}
+          {sendState === "sent" && <CheckCircle size={13} />}
+          {sendState === "error" && <AlertTriangle size={13} />}
+          {sendState === "idle" && <FileText size={13} />}
+          {sendState === "sending" ? "Envoi en cours…" : sendState === "sent" ? "Rapport envoyé" : sendState === "error" ? "Échec" : "Envoyer le rapport PDF"}
+        </button>
+      </div>
       </div>
 
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/5 text-red-400 text-xs px-3 py-2">
+          Impossible de joindre {API_BASE_URL} ({error}). Vérifiez que le backend Flask tourne.
+        </div>
+      )}
+
+      {!loading && !error && !hasData && (
+        <div className="rounded-lg border border-orange-500/20 bg-orange-500/5 text-orange-400 text-xs px-3 py-2">
+          Aucune détection enregistrée pour cette période — les données apparaîtront ici dès que le modèle détectera des travailleurs sur une caméra.
+        </div>
+      )}
+
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KPICard label="Avg Compliance" value="86.4%"  sub={`This ${reportType.toLowerCase()}`} icon={Shield}        trend="+1.2%" color="green" />
-        <KPICard label="Total Violations" value={reportType === "Daily" ? "37" : reportType === "Weekly" ? "147" : "588"} sub="PPE violations" icon={AlertTriangle} trend="-8" color="red" />
-        <KPICard label="Workers Monitored" value={reportType === "Daily" ? "98" : reportType === "Weekly" ? "341" : "1,240"} sub="Unique events" icon={User} color="blue" />
-        <KPICard label="Detection Accuracy" value="94.8%" sub="Model conf. avg." icon={Cpu} color="orange" />
+        <KPICard label="Avg Compliance"     value={loading ? "…" : `${summary?.avg_compliance ?? 0}%`}      sub={`This ${reportType.toLowerCase()}`} icon={Shield}        color="green" />
+        <KPICard label="Total Violations"   value={loading ? "…" : summary?.total_violations ?? 0}          sub="PPE violations"                     icon={AlertTriangle} color="red" />
+        <KPICard label="Workers Monitored"  value={loading ? "…" : summary?.workers_monitored ?? 0}         sub="Detection events"                   icon={User}          color="blue" />
+        <KPICard label="Detection Accuracy" value={loading ? "…" : `${summary?.detection_accuracy ?? 0}%`}  sub="Model conf. avg."                   icon={Cpu}           color="orange" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div className="rounded-xl border border-border bg-card p-5">
           <SectionTitle title={`${reportType} Compliance Trend`} />
           <ResponsiveContainer width="100%" height={210}>
-            <LineChart data={chartData}>
+            <LineChart data={trend}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
               <XAxis dataKey={xKey} tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis domain={[70, 100]} tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis domain={[0, 100]} tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
               <Tooltip contentStyle={tooltipStyle} />
               <Line type="monotone" dataKey="compliance" stroke="#22c55e" strokeWidth={2.5} dot={{ fill: "#22c55e", r: 3 }} name="Compliance %" />
             </LineChart>
@@ -1445,7 +1721,7 @@ function ReportsPage() {
         <div className="rounded-xl border border-border bg-card p-5">
           <SectionTitle title="Violations by Terminal" />
           <ResponsiveContainer width="100%" height={210}>
-            <BarChart data={violationsByTerminal} barSize={16} barGap={3}>
+            <BarChart data={byTerminal} barSize={16} barGap={3}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
               <XAxis dataKey="terminal" tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -1461,7 +1737,7 @@ function ReportsPage() {
         <div className="rounded-xl border border-border bg-card p-5">
           <SectionTitle title={`${reportType} Violations`} />
           <ResponsiveContainer width="100%" height={210}>
-            <BarChart data={chartData}>
+            <BarChart data={trend}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
               <XAxis dataKey={xKey} tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fill: "#5a7a96", fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -1476,27 +1752,30 @@ function ReportsPage() {
           <div className="flex items-center gap-4">
             <ResponsiveContainer width="45%" height={180}>
               <PieChart>
-                <Pie data={violationTypePie.slice(0, 3)} cx="50%" cy="50%" innerRadius={42} outerRadius={72} paddingAngle={4} dataKey="value">
-                  {violationTypePie.slice(0, 3).map((e, i) => <Cell key={i} fill={e.color} />)}
+                <Pie data={violationTypes} cx="50%" cy="50%" innerRadius={42} outerRadius={72} paddingAngle={4} dataKey="value">
+                  {violationTypes.map((e, i) => <Cell key={i} fill={e.color} />)}
                 </Pie>
                 <Tooltip contentStyle={tooltipStyle} />
               </PieChart>
             </ResponsiveContainer>
             <div className="flex-1 space-y-3">
-              {violationTypePie.slice(0, 3).map(item => (
-                <div key={item.name}>
-                  <div className="flex justify-between text-xs mb-1.5">
-                    <span className="flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 rounded-sm" style={{ background: item.color }} />
-                      <span className="text-muted-foreground">{item.name}</span>
-                    </span>
-                    <span className="font-mono text-foreground">{item.value}</span>
+              {violationTypes.map(item => {
+                const max = Math.max(1, ...violationTypes.map(v => v.value));
+                return (
+                  <div key={item.name}>
+                    <div className="flex justify-between text-xs mb-1.5">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-sm" style={{ background: item.color }} />
+                        <span className="text-muted-foreground">{item.name}</span>
+                      </span>
+                      <span className="font-mono text-foreground">{item.value}</span>
+                    </div>
+                    <div className="h-1 rounded-full bg-white/5">
+                      <div className="h-full rounded-full" style={{ width: `${(item.value / max) * 100}%`, background: item.color }} />
+                    </div>
                   </div>
-                  <div className="h-1 rounded-full bg-white/5">
-                    <div className="h-full rounded-full" style={{ width: `${(item.value / 78) * 100}%`, background: item.color }} />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
@@ -1831,6 +2110,7 @@ export default function App() {
                 </div>
               )
             )}
+            {page === "audit-logs" && <AuditLogsView apiBaseUrl={API_BASE_URL} currentUser={currentUser} />}
             {page === "settings"   && <SettingsPage darkMode={darkMode} setDarkMode={setDarkMode} />}
           </main>
         </div>
