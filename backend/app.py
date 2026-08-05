@@ -3,6 +3,10 @@
 Marsa Maroc — PPE Detection Backend (Flask)
 
 =======
+
+
+
+
 -----------------------------------------------------------------------------
 Reproduit exactement la logique de `test_video.py` (aucun tracking, aucun
 lissage temporel, aucun vote) — juste exposée via une API Flask pour le
